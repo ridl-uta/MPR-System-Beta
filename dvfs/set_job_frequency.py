@@ -44,8 +44,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--signal",
-        default="MSR::PERF_CTL:FREQ",
-        help="GEOPM signal name to write (default: MSR::PERF_CTL:FREQ)",
+        default="CPU_FREQUENCY_MAX_CONTROL",
+        help="GEOPM signal name to write (default: CPU_FREQUENCY_MAX_CONTROL)",
     )
     parser.add_argument(
         "--domain",
