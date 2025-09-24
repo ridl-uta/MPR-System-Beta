@@ -44,13 +44,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--signal",
-        default="FREQUENCY_CONTROL",
-        help="GEOPM signal name to write (default: FREQUENCY_CONTROL)",
+        default="MSR::PERF_CTL:FREQ",
+        help="GEOPM signal name to write (default: MSR::PERF_CTL:FREQ)",
     )
     parser.add_argument(
         "--domain",
-        default="cpu",
-        help="GEOPM domain name to target (default: cpu)",
+        default="core",
+        help="GEOPM domain name to target (default: core)",
     )
     parser.add_argument(
         "--dry-run",
