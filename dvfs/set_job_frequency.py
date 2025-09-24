@@ -157,6 +157,7 @@ def main() -> None:
             "1",
             "--ntasks-per-node=1",
             "--overlap",
+            "--immediate=10",
             "bash",
             "-lc",
             remote,
@@ -174,9 +175,25 @@ def main() -> None:
         if result.returncode != 0:
             overall_ok = False
             print(
-                f"[ERR] srun command failed for {host} (exit {result.returncode})",
+                f"[ERR] srun failed for {host} (exit {result.returncode})",
                 file=sys.stderr,
             )
+            if "immediate" in result.stderr.lower():
+                print(
+                    "[HINT] Slurm could not start the helper step immediately. "
+                    "The job may be fully busy or overlap is disabled.",
+                    file=sys.stderr,
+                )
+            elif "overlap" in result.stderr.lower():
+                print(
+                    "[HINT] Slurm rejected --overlap; your site may disable overlapping steps.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "[HINT] Check geopmwrite permissions, job state, and Slurm logs for details.",
+                    file=sys.stderr,
+                )
 
     if not args.dry_run:
         if overall_ok:

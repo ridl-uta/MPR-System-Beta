@@ -15,8 +15,12 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Iterable, List, Optional
 
-from ..overload_detection.overload_detection import make_simple_overload_ctx, simple_overload_update
-from ..overload_detection.overload_handler import LoadShedder
+try:  # Prefer absolute imports when package layout is flat
+    from overload_detection.overload_detection import make_simple_overload_ctx, simple_overload_update
+    from overload_detection.overload_handler import LoadShedder
+except ImportError:  # pragma: no cover - fallback when imported as package
+    from ..overload_detection.overload_detection import make_simple_overload_ctx, simple_overload_update
+    from ..overload_detection.overload_handler import LoadShedder
 
 # ---- Patterns ----
 OUTLET_LINE_RE = re.compile(r"^\s*(\d+):.*?(\d+)\s*W\s*$")
