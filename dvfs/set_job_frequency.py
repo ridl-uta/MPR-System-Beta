@@ -127,6 +127,7 @@ def format_remote_loop(
         "set -euo pipefail; "
         f"for core in {core_list}; do "
         f"{geopm_cmd} {signal_q} {domain_q} $core {value_q}; "
+        "sleep 1; "
         "done"
     )
     return loop
