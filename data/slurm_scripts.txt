@@ -1,0 +1,3 @@
+# Slurm scripts to be submitted by schedule_pack_jobs.py
+# Add one script path per line. Lines starting with # are ignored.
+slurm_jobs/demo_pack.slurm

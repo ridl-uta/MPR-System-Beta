@@ -1,0 +1,27 @@
+{
+  "outlets": 24,
+  "pdus": [
+    {
+      "host": "192.168.2.243",
+      "port": 23,
+      "map": {
+        "2": "ridlserver02",
+        "4": "ridlserver04",
+        "5": "ridlserver05",
+        "11": "ridlserver11",
+        "12": "ridlserver12"
+      }
+    },
+    {
+      "host": "192.168.2.242",
+      "port": 23,
+      "map": {
+        "2": "ridlserver02",
+        "4": "ridlserver04",
+        "5": "ridlserver05",
+        "11": "ridlserver11",
+        "12": "ridlserver12"
+      }
+    }
+  ]
+}
