@@ -17,7 +17,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-from typing import List
+from typing import List, Tuple
 
 import job_cores
 
@@ -66,7 +66,21 @@ def require_command(cmd: str) -> None:
         sys.exit(127)
 
 
-def parse_frequency(value: str, default_unit: str) -> int:
+def _format_frequency_token(hz: float) -> str:
+    """Return a human-friendly exponential representation (e.g. 1.2e9)."""
+    token = f"{hz:.6e}"
+    mantissa, exp = token.split("e")
+    # Trim trailing zeros in mantissa for cleaner output
+    mantissa = mantissa.rstrip("0").rstrip(".")
+    sign = ""
+    if exp.startswith(('+', '-')):
+        sign = exp[0] if exp[0] == '-' else ''
+        exp = exp[1:]
+    exp = exp.lstrip('0') or '0'
+    return f"{mantissa}e{sign}{exp}"
+
+
+def parse_frequency(value: str, default_unit: str) -> Tuple[float, str]:
     text = value.strip()
     if not text:
         raise ValueError("empty frequency")
@@ -93,17 +107,26 @@ def parse_frequency(value: str, default_unit: str) -> int:
     if hz <= 0:
         raise ValueError("frequency must be positive")
 
-    return int(round(hz))
+    hz = float(hz)
+    token = _format_frequency_token(hz)
+    return hz, token
 
 
-def format_remote_loop(cores: List[int], geopm_cmd: str, signal: str, domain: str, value: int) -> str:
+def format_remote_loop(
+    cores: List[int],
+    geopm_cmd: str,
+    signal: str,
+    domain: str,
+    value_token: str,
+) -> str:
     core_list = ' '.join(str(c) for c in cores)
     signal_q = shlex.quote(signal)
     domain_q = shlex.quote(domain)
+    value_q = shlex.quote(value_token)
     loop = (
         "set -euo pipefail; "
         f"for core in {core_list}; do "
-        f"{geopm_cmd} {signal_q} {domain_q} $core {value}; "
+        f"{geopm_cmd} {signal_q} {domain_q} $core {value_q}; "
         "done"
     )
     return loop
@@ -113,7 +136,7 @@ def main() -> None:
     args = parse_args()
 
     try:
-        freq_hz = parse_frequency(args.frequency, args.unit)
+        freq_hz, freq_token = parse_frequency(args.frequency, args.unit)
     except ValueError as exc:
         print(f"[ERR] {exc}", file=sys.stderr)
         sys.exit(1)
@@ -145,7 +168,7 @@ def main() -> None:
             f"[INFO] Setting {len(cores)} cores on {host} to {freq_hz/1e6:.3f} MHz "
             f"using {args.signal}/{args.domain}"
         )
-        remote = format_remote_loop(cores, geopm_cmd, args.signal, args.domain, freq_hz)
+        remote = format_remote_loop(cores, geopm_cmd, args.signal, args.domain, freq_token)
         cmd = [
             srun_cmd,
             f"--jobid={args.jobid}",
