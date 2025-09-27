@@ -13,18 +13,36 @@ need_cmd geopmread
 need_cmd geopmwrite
 need_cmd lscpu
 
-CONF_PATH="${1:-/shared/geopm/freq/$(hostname).conf}"
-if [[ ! -r "$CONF_PATH" ]]; then
-  err "Config not found or unreadable: $CONF_PATH"
+DEFAULT_CONF="/shared/geopm/freq/$(hostname).conf"
+DEFAULT_DIR="/shared/geopm/freq/$(hostname).d"
+
+# Build list of configuration files to apply. Accepts multiple args; if none
+# provided, use default conf and any files in <host>.d/*.conf (if present).
+CONFIGS=()
+if (( $# == 0 )); then
+  [[ -r "$DEFAULT_CONF" ]] && CONFIGS+=("$DEFAULT_CONF")
+  if [[ -d "$DEFAULT_DIR" ]]; then
+    while IFS= read -r -d '' f; do CONFIGS+=("$f"); done < <(find "$DEFAULT_DIR" -maxdepth 1 -type f -name '*.conf' -print0 | sort -z)
+  fi
+else
+  for arg in "$@"; do
+    if [[ -d "$arg" ]]; then
+      while IFS= read -r -d '' f; do CONFIGS+=("$f"); done < <(find "$arg" -maxdepth 1 -type f -name '*.conf' -print0 | sort -z)
+    elif [[ -r "$arg" ]]; then
+      CONFIGS+=("$arg")
+    else
+      err "Config path not found or unreadable: $arg"
+      exit 1
+    fi
+  done
+fi
+
+if (( ${#CONFIGS[@]} == 0 )); then
+  err "No configuration files found. Looked for $DEFAULT_CONF and $DEFAULT_DIR/*.conf"
   exit 1
 fi
 
-# shellcheck source=/dev/null
-set -a
-source "$CONF_PATH"
-set +a
-
-# Supported config variables (all optional unless noted):
+# Supported config variables (per config; optional unless noted):
 # - FREQ_HZ: target frequency in Hz; if "max" or empty, use max available.
 # - CORES: space-separated core IDs to target (e.g., "0 2 4 6 8").
 # - CPUS: space-separated logical CPU IDs to target. Ignored if CORES is set.
@@ -32,11 +50,6 @@ set +a
 # - RESPECT_CPUSET: 1 to limit to process cpuset (default: 0)
 # - RETRIES: write attempts per target (default: 5)
 # - RETRY_SLEEP: seconds between retries (default: 0.25)
-
-CONTROL_KIND=${CONTROL_KIND:-AUTO}
-RESPECT_CPUSET=${RESPECT_CPUSET:-0}
-RETRIES=${RETRIES:-5}
-RETRY_SLEEP=${RETRY_SLEEP:-0.25}
 
 # Resolve frequency
 resolve_max_hz() {
@@ -59,16 +72,6 @@ resolve_max_hz() {
   return 1
 }
 
-if [[ -z "${FREQ_HZ:-}" || "$FREQ_HZ" == "max" ]]; then
-  if ! FREQ_HZ=$(resolve_max_hz); then
-    err "Unable to determine max frequency"
-    exit 1
-  fi
-fi
-
-log "Using FREQ_HZ=${FREQ_HZ}"
-
-# Build allowed CPU set (optional)
 expand_list() {
   local list="$1" part a b i
   IFS=',' read -ra parts <<< "$list"
@@ -82,54 +85,10 @@ expand_list() {
   done
 }
 
-ALLOWED_CPUS=""
-if [[ "$RESPECT_CPUSET" == "1" ]]; then
-  allowed_list=$(awk '/Cpus_allowed_list/ {print $2}' /proc/self/status || true)
-  if [[ -n "${allowed_list:-}" ]]; then
-    ALLOWED_CPUS=$(expand_list "$allowed_list" | tr '\n' ' ')
-    log "Restricting to cpuset: ${allowed_list} => ${ALLOWED_CPUS}"
-  else
-    log "RESPECT_CPUSET=1 but could not read Cpus_allowed_list; proceeding without restriction"
-  fi
-fi
-
-in_allowed() {
-  local cpu="$1"
-  [[ -z "$ALLOWED_CPUS" ]] && return 0
-  grep -q "\b${cpu}\b" <<<" ${ALLOWED_CPUS} "
-}
-
-# Build target lists
 map_core_to_cpus() {
   local core_id="$1"
   lscpu -p=CPU,CORE | awk -F, -v k="$core_id" '/^[^#]/ && $2==k {print $1}'
 }
-
-TARGET_CPUS=()
-TARGET_CORES=()
-
-if [[ -n "${CORES:-}" ]]; then
-  for c in $CORES; do TARGET_CORES+=("$c"); done
-  # also build CPUs for fallback/CPU domain
-  for c in "${TARGET_CORES[@]}"; do
-    while read -r cpu; do
-      [[ -z "$cpu" ]] && continue
-      in_allowed "$cpu" || continue
-      TARGET_CPUS+=("$cpu")
-    done < <(map_core_to_cpus "$c")
-  done
-elif [[ -n "${CPUS:-}" ]]; then
-  for cpu in $CPUS; do
-    in_allowed "$cpu" || continue
-    TARGET_CPUS+=("$cpu")
-  done
-else
-  # default: all CPUs
-  while read -r cpu; do
-    in_allowed "$cpu" || continue
-    TARGET_CPUS+=("$cpu")
-  done < <(lscpu -p=CPU | awk -F, '/^[^#]/ {print $1}')
-fi
 
 write_with_retry() {
   local cmd="$1"; shift
@@ -145,14 +104,6 @@ write_with_retry() {
     attempt=$((attempt+1))
   done
 }
-
-has_access_core_max=0
-if geopmaccess -l 2>/dev/null | grep -q "CPU_FREQUENCY_MAX_CONTROL.*core"; then
-  has_access_core_max=1
-fi
-
-applied=0
-failed=0
 
 apply_core_max() {
   local rc=0
@@ -191,33 +142,119 @@ apply_cpu_ctrl() {
   return $rc
 }
 
-case "$CONTROL_KIND" in
-  CORE_MAX)
-    if ! apply_core_max; then
-      err "CORE_MAX writes failed"
-      exit 2
+# Apply a single configuration file
+apply_one_conf() {
+  local conf="$1"
+  log "Applying config: $conf"
+
+  # Reset per-config variables/state
+  unset FREQ_HZ CORES CPUS CONTROL_KIND RESPECT_CPUSET RETRIES RETRY_SLEEP
+  ALLOWED_CPUS=""
+  TARGET_CPUS=()
+  TARGET_CORES=()
+  applied=0
+  failed=0
+
+  # shellcheck source=/dev/null
+  set -a
+  source "$conf"
+  set +a
+
+  CONTROL_KIND=${CONTROL_KIND:-AUTO}
+  RESPECT_CPUSET=${RESPECT_CPUSET:-0}
+  RETRIES=${RETRIES:-5}
+  RETRY_SLEEP=${RETRY_SLEEP:-0.25}
+
+  if [[ -z "${FREQ_HZ:-}" || "$FREQ_HZ" == "max" ]]; then
+    if ! FREQ_HZ=$(resolve_max_hz); then
+      err "Unable to determine max frequency"
+      return 1
     fi
-    ;;
-  CPU)
-    if ! apply_cpu_ctrl; then
-      err "CPU CONTROL writes failed"
-      exit 2
-    fi
-    ;;
-  AUTO|*)
-    if [[ "$has_access_core_max" == "1" && -n "${CORES:-}" ]]; then
-      if apply_core_max; then
-        :
-      else
-        log "Falling back to CPU domain control"
-        apply_cpu_ctrl || { err "Fallback CPU CONTROL writes failed"; exit 2; }
-      fi
+  fi
+  log "Using FREQ_HZ=${FREQ_HZ}"
+
+  # Build allowed CPU set (optional)
+  if [[ "$RESPECT_CPUSET" == "1" ]]; then
+    local allowed_list
+    allowed_list=$(awk '/Cpus_allowed_list/ {print $2}' /proc/self/status || true)
+    if [[ -n "${allowed_list:-}" ]]; then
+      ALLOWED_CPUS=$(expand_list "$allowed_list" | tr '\n' ' ')
+      log "Restricting to cpuset: ${allowed_list} => ${ALLOWED_CPUS}"
     else
-      apply_cpu_ctrl || { err "CPU CONTROL writes failed"; exit 2; }
+      log "RESPECT_CPUSET=1 but could not read Cpus_allowed_list; proceeding without restriction"
     fi
-    ;;
-esac
+  fi
 
-log "Applied=${applied} Failed=${failed}"
+  in_allowed() {
+    local cpu="$1"
+    [[ -z "$ALLOWED_CPUS" ]] && return 0
+    grep -q "\b${cpu}\b" <<<" ${ALLOWED_CPUS} "
+  }
+
+  # Build target lists
+  if [[ -n "${CORES:-}" ]]; then
+    local c
+    for c in $CORES; do TARGET_CORES+=("$c"); done
+    for c in "${TARGET_CORES[@]}"; do
+      while read -r cpu; do
+        [[ -z "$cpu" ]] && continue
+        in_allowed "$cpu" || continue
+        TARGET_CPUS+=("$cpu")
+      done < <(map_core_to_cpus "$c")
+    done
+  elif [[ -n "${CPUS:-}" ]]; then
+    local cpu
+    for cpu in $CPUS; do
+      in_allowed "$cpu" || continue
+      TARGET_CPUS+=("$cpu")
+    done
+  else
+    while read -r cpu; do
+      in_allowed "$cpu" || continue
+      TARGET_CPUS+=("$cpu")
+    done < <(lscpu -p=CPU | awk -F, '/^[^#]/ {print $1}')
+  fi
+
+  local has_access_core_max=0
+  if geopmaccess -l 2>/dev/null | grep -q "CPU_FREQUENCY_MAX_CONTROL.*core"; then
+    has_access_core_max=1
+  fi
+
+  case "$CONTROL_KIND" in
+    CORE_MAX)
+      if ! apply_core_max; then
+        err "CORE_MAX writes failed"
+        return 2
+      fi
+      ;;
+    CPU)
+      if ! apply_cpu_ctrl; then
+        err "CPU CONTROL writes failed"
+        return 2
+      fi
+      ;;
+    AUTO|*)
+      if [[ "$has_access_core_max" == "1" && -n "${CORES:-}" ]]; then
+        if apply_core_max; then :; else
+          log "Falling back to CPU domain control"
+          apply_cpu_ctrl || { err "Fallback CPU CONTROL writes failed"; return 2; }
+        fi
+      else
+        apply_cpu_ctrl || { err "CPU CONTROL writes failed"; return 2; }
+      fi
+      ;;
+  esac
+
+  log "Config applied: $conf Applied=${applied} Failed=${failed}"
+  total_applied=$((total_applied + applied))
+  total_failed=$((total_failed + failed))
+}
+
+total_applied=0
+total_failed=0
+for conf in "${CONFIGS[@]}"; do
+  apply_one_conf "$conf" || true
+done
+
+log "Total Applied=${total_applied} Failed=${total_failed}"
 exit 0
-

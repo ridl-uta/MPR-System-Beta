@@ -1,5 +1,12 @@
 # Per-host GEOPM frequency apply config
 # Copy to /shared/geopm/freq/<hostname>.conf and edit.
+#
+# Multiple configurations:
+# - You can pass multiple .conf files to geopm_apply.sh, e.g.:
+#     sudo /usr/local/sbin/geopm_apply.sh /shared/geopm/freq/host-A.conf /shared/geopm/freq/host-B.conf
+# - Or place additional configs in /shared/geopm/freq/<hostname>.d/*.conf.
+#   The apply script will process them in lexicographic order as well as the
+#   main <hostname>.conf when no path arguments are provided.
 
 # Target frequency in Hz. Use a number (e.g., 1600000000, 2.2e9) or 'max'.
 FREQ_HZ=2.1e9
@@ -23,4 +30,3 @@ CORES="0 2 4 6 8"
 # Retry behavior for transient writer-lock contention.
 #RETRIES=5
 #RETRY_SLEEP=0.25
-
