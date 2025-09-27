@@ -147,6 +147,50 @@ apply_one_conf() {
   local conf="$1"
   log "Applying config: $conf"
 
+  # Support multi-rule blocks within a single file, delimited by lines starting
+  # with '### RULE'. Each block contains the same variable names as a normal
+  # single-config file.
+  if grep -qE '^[[:space:]]*###[[:space:]]+RULE' "$conf"; then
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    # Split into numbered blocks rule_00.conf, rule_01.conf, ...
+    awk -v dir="$tmpdir" '
+      BEGIN { n = -1 }
+      /^[[:space:]]*###[[:space:]]+RULE/ { n++; next }
+      n >= 0 { printf "%s\n", $0 >> (dir "/rule_" sprintf("%02d", n) ".conf") }
+    ' "$conf"
+    local blocks=("$tmpdir"/rule_*.conf)
+    if ls ${blocks[*]} >/dev/null 2>&1; then
+      local b
+      for b in "${blocks[@]}"; do
+        [[ -e "$b" ]] || continue
+        log "Applying rule block: $(basename "$b") from $conf"
+        apply_block_from_file "$b" || true
+      done
+    else
+      err "Found RULE markers but no blocks parsed in $conf"
+    fi
+    rm -rf "$tmpdir"
+    return 0
+  fi
+
+  # Single-block classic config
+  apply_block_from_file "$conf"
+}
+
+total_applied=0
+total_failed=0
+for conf in "${CONFIGS[@]}"; do
+  apply_one_conf "$conf" || true
+done
+
+log "Total Applied=${total_applied} Failed=${total_failed}"
+exit 0
+
+# Helper: apply a single block config from file (contains FREQ_HZ/CORES/CPUS/etc.)
+apply_block_from_file() {
+  local conf="$1"
+
   # Reset per-config variables/state
   unset FREQ_HZ CORES CPUS CONTROL_KIND RESPECT_CPUSET RETRIES RETRY_SLEEP
   ALLOWED_CPUS=""
@@ -245,16 +289,7 @@ apply_one_conf() {
       ;;
   esac
 
-  log "Config applied: $conf Applied=${applied} Failed=${failed}"
+  log "Applied=${applied} Failed=${failed} (block: $conf)"
   total_applied=$((total_applied + applied))
   total_failed=$((total_failed + failed))
 }
-
-total_applied=0
-total_failed=0
-for conf in "${CONFIGS[@]}"; do
-  apply_one_conf "$conf" || true
-done
-
-log "Total Applied=${total_applied} Failed=${total_failed}"
-exit 0
