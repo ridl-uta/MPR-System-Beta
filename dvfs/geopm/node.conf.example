@@ -1,0 +1,26 @@
+# Per-host GEOPM frequency apply config
+# Copy to /shared/geopm/freq/<hostname>.conf and edit.
+
+# Target frequency in Hz. Use a number (e.g., 1600000000, 2.2e9) or 'max'.
+FREQ_HZ=2.1e9
+
+# Target cores (space-separated core IDs). Example: "0 2 4 6 8"
+# If unset, CPUS (below) is used; if both unset, all CPUs are targeted.
+CORES="0 2 4 6 8"
+
+# Alternatively, target logical CPUs directly (space-separated CPU IDs).
+#CPUS="0 1 2 3"
+
+# Control kind: AUTO | CORE_MAX | CPU (default AUTO).
+# - CORE_MAX: write CPU_FREQUENCY_MAX_CONTROL at core domain (if permitted).
+# - CPU: write CPU_FREQUENCY_CONTROL at cpu domain for each logical CPU.
+# - AUTO: prefer CORE_MAX when CORES are provided and permitted, else CPU.
+#CONTROL_KIND=AUTO
+
+# Limit writes to the process cpuset (useful if run inside a job cgroup).
+#RESPECT_CPUSET=0
+
+# Retry behavior for transient writer-lock contention.
+#RETRIES=5
+#RETRY_SLEEP=0.25
+

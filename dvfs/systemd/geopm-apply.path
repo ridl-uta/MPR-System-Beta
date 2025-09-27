@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch host GEOPM freq config and apply on change
+
+[Path]
+PathChanged=/shared/geopm/freq/%H.conf
+Unit=geopm-apply.service
+
+[Install]
+WantedBy=multi-user.target
+

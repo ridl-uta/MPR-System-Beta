@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply GEOPM CPU frequency settings from host config
+Wants=geopmd.service
+After=network.target geopmd.service
+
+[Service]
+Type=oneshot
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/sbin/geopm_apply.sh /shared/geopm/freq/%H.conf
+Nice=5
+IOSchedulingClass=best-effort
+
+[Install]
+WantedBy=multi-user.target
+
