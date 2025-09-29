@@ -1,42 +1,14 @@
-# Per-host GEOPM frequency apply config
-# Copy to /shared/geopm/freq/<hostname>.conf and edit.
-#
-# Multiple configurations:
-# - You can pass multiple .conf files to geopm_apply.sh, e.g.:
-#     sudo /usr/local/sbin/geopm_apply.sh /shared/geopm/freq/host-A.conf /shared/geopm/freq/host-B.conf
-# - Or place additional configs in /shared/geopm/freq/<hostname>.d/*.conf.
-#   The apply script will process them in lexicographic order as well as the
-#   main <hostname>.conf when no path arguments are provided.
-# - Or define multiple blocks in a single file using markers:
-#     ### RULE front-cores
-#     FREQ_HZ=2.1e9
-#     CORES="0 2 4 6 8"
-#     CONTROL_KIND=CORE_MAX
-#
-#     ### RULE back-cores
-#     FREQ_HZ=1.6e9
-#     CORES="1 3 5 7 9"
-#     CONTROL_KIND=CORE_MAX
-
-# Target frequency in Hz. Use a number (e.g., 1600000000, 2.2e9) or 'max'.
+### RULE front-cores
 FREQ_HZ=2.1e9
-
-# Target cores (space-separated core IDs). Example: "0 2 4 6 8"
-# If unset, CPUS (below) is used; if both unset, all CPUs are targeted.
 CORES="0 2 4 6 8"
+CONTROL_KIND=CORE_MAX
 
-# Alternatively, target logical CPUs directly (space-separated CPU IDs).
-#CPUS="0 1 2 3"
+### RULE back-cores
+FREQ_HZ=1.6e9
+CORES="1 3 5 7 9"
+CONTROL_KIND=CORE_MAX
 
-# Control kind: AUTO | CORE_MAX | CPU (default AUTO).
-# - CORE_MAX: write CPU_FREQUENCY_MAX_CONTROL at core domain (if permitted).
-# - CPU: write CPU_FREQUENCY_CONTROL at cpu domain for each logical CPU.
-# - AUTO: prefer CORE_MAX when CORES are provided and permitted, else CPU.
-#CONTROL_KIND=AUTO
-
-# Limit writes to the process cpuset (useful if run inside a job cgroup).
-#RESPECT_CPUSET=0
-
-# Retry behavior for transient writer-lock contention.
-#RETRIES=5
-#RETRY_SLEEP=0.25
+### RULE housekeeping
+FREQ_HZ=1.2e9
+CORES="10 11"
+CONTROL_KIND=CORE_MAX
