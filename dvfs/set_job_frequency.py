@@ -19,7 +19,7 @@ import subprocess
 import sys
 from typing import List, Tuple
 
-import job_cores
+from . import job_cores
 
 
 def parse_args() -> argparse.Namespace:
