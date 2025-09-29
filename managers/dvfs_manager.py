@@ -26,7 +26,7 @@ from dvfs import (
 _DEFAULT_Q = 1.0
 _DEFAULT_DELTA = 0.4
 _DEFAULT_MAX_FREQ_MHZ = 2200.0
-_DEFAULT_MIN_FREQ_MHZ = 800.0
+_DEFAULT_MIN_FREQ_MHZ = 1600.0
 
 
 def supply(bid: float, q: float = _DEFAULT_Q, delta: float = _DEFAULT_DELTA) -> float:
