@@ -1,0 +1,12 @@
+# Minimal multi-rule GEOPM config; copy as /shared/geopm/freq/<hostname>.conf
+
+### RULE front-cores
+FREQ_HZ=2.1e9
+CORES="0 2 4 6 8"
+CONTROL_KIND=CORE_MAX
+
+### RULE back-cores
+FREQ_HZ=1.6e9
+CORES="1 3 5 7 9"
+CONTROL_KIND=CORE_MAX
+
