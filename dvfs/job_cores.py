@@ -163,27 +163,4 @@ def collect_host_cores(jobid: str) -> tuple[str, Dict[str, List[int]]]:
     return state, host_map
 
 
-def main() -> None:
-    args = parse_args()
-    jobid = args.jobid
-
-    try:
-        state, host_map = collect_host_cores(jobid)
-    except JobCoresError as exc:
-        print(f"[ERR] {exc}", file=sys.stderr)
-        sys.exit(exc.exit_code)
-
-    if state and state.upper() != "RUNNING":
-        print(f"[WARN] job state: {state}")
-
-    for host, cores in host_map.items():
-        expanded = ' '.join(str(core) for core in cores)
-        if args.bash:
-            var = sanitize_host(host)
-            print(f"CORES_{var}=({expanded})")
-        else:
-            print(f"{host}: {expanded}")
-
-
-if __name__ == "__main__":
-    main()
+# Note: CLI entry-point removed to use this module as a helper library only.
