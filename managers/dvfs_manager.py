@@ -166,36 +166,23 @@ class DVFSManager:
 # CLI entry-point
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
+    # Minimal CLI: print nodes and cores for a Slurm job ID.
     import argparse
+    from dvfs import job_cores
 
-    parser = argparse.ArgumentParser(description="Asynchronous DVFS manager demo")
+    parser = argparse.ArgumentParser(description="Show nodes and cores for a Slurm job")
     parser.add_argument("job_id", help="Slurm job identifier")
-    parser.add_argument("bid", type=float, help="Bid value")
-    parser.add_argument("--q", type=float, default=_DEFAULT_Q)
-    parser.add_argument("--delta", type=float, default=_DEFAULT_DELTA)
-    parser.add_argument("--max-freq", type=float, default=_DEFAULT_MAX_FREQ_MHZ)
-    parser.add_argument("--min-freq", type=float, default=_DEFAULT_MIN_FREQ_MHZ)
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--demo-nodes", nargs='+', default=None)
-    parser.add_argument("--demo-cores", nargs='+', type=int, default=None)
-    parser.add_argument("--set-job-frequency-extra", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
-    manager = DVFSManager(
-        q=args.q,
-        delta=args.delta,
-        max_freq_mhz=args.max_freq,
-        min_freq_mhz=args.min_freq,
-    )
-    manager.start()
-    manager.submit_bid(
-        args.job_id,
-        args.bid,
-        dry_run=args.dry_run,
-        extra_args=args.set_job_frequency_extra,
-        demo_nodes=args.demo_nodes,
-        demo_cores=args.demo_cores,
-    )
-    # Wait briefly for the background worker to process the single bid
-    manager._queue.join()
-    manager.stop()
+    try:
+        state, host_map = job_cores.collect_host_cores(args.job_id)
+    except job_cores.JobCoresError as exc:
+        print(f"[ERR] {exc}", file=sys.stderr)
+        sys.exit(exc.exit_code)
+
+    if state and state.upper() != "RUNNING":
+        print(f"[WARN] job state: {state}")
+
+    for host, cores in host_map.items():
+        expanded = " ".join(str(c) for c in cores)
+        print(f"{host}: {expanded}")
