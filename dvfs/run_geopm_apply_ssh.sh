@@ -115,9 +115,11 @@ done
 # Any remaining args as hosts
 while (( $# > 0 )); do HOSTS+=("$1"); shift; done
 
-for f in "${HOST_FILES[@]:-}"; do
-  parse_hosts_file "$f"
-done
+if (( ${#HOST_FILES[@]} > 0 )); then
+  for f in "${HOST_FILES[@]}"; do
+    parse_hosts_file "$f"
+  done
+fi
 
 if (( ${#HOSTS[@]} == 0 )); then
   echo "[ERR] no hosts provided" >&2
@@ -208,4 +210,3 @@ else
 fi
 
 exit "$rc"
-
