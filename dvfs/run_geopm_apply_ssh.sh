@@ -136,6 +136,27 @@ if [[ -n "$SSH_IDENTITY" ]]; then
   ssh_base+=( -i "$SSH_IDENTITY" )
 fi
 
+# Detect if a host refers to this machine (by name or IP)
+is_self_host() {
+  local h="$1"
+  local short hostf all_ips ip
+  short=$(hostname -s 2>/dev/null || true)
+  hostf=$(hostname -f 2>/dev/null || true)
+  if [[ "$h" == "localhost" || "$h" == "127.0.0.1" || "$h" == "$short" || "$h" == "$hostf" ]]; then
+    return 0
+  fi
+  # Compare against all assigned IPv4 addresses
+  if command -v ip >/dev/null 2>&1; then
+    all_ips=$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+  else
+    all_ips=$(hostname -I 2>/dev/null || true)
+  fi
+  for ip in $all_ips; do
+    [[ "$h" == "$ip" ]] && return 0
+  done
+  return 1
+}
+
 # Build remote action template
 build_remote_cmd() {
   local direct="$1" conf="$2" allow_sudo="$3"
@@ -167,6 +188,20 @@ run_one() {
   local target="$host"
   if [[ -n "$SSH_USER" ]]; then
     target="${SSH_USER}@${host}"
+  fi
+  if is_self_host "$host"; then
+    # Execute locally if target is this host
+    if (( DRY_RUN == 1 )); then
+      printf '[DRY] local: %s\n' "$REMOTE_CMD_TEMPLATE"
+      return 0
+    fi
+    if bash -lc "$REMOTE_CMD_TEMPLATE"; then
+      echo "[$host] OK (local)"
+      return 0
+    else
+      echo "[$host] FAIL (local)" >&2
+      return 1
+    fi
   fi
   local cmd=("${ssh_base[@]}" "$target" "$REMOTE_CMD_TEMPLATE")
   if (( DRY_RUN == 1 )); then
