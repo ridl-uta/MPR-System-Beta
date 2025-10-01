@@ -8,15 +8,15 @@ performs a periodic no-op tick, which you can extend later.
 
 from __future__ import annotations
 
+import random
 import threading
-import time
 
 
 VALID_MPR_MODES = {"mpr_stat", "mpr_int"}
 
 # Empirical resource reduction (fraction) vs power savings (watts)
 # to be shared across supported job names.
-RESOURCE_POWER_CURVE = [
+BASE_RESOURCE_POWER_CURVE = [
     (0.311549244, 90.26631158),
     (0.337285721, 97.72303595),
     (0.363022198, 105.1797603),
@@ -48,10 +48,38 @@ SUPPORTED_JOBS = {
     "simpleMOC",
 }
 
-# Map each job name to the shared resource/power curve (extendable later).
-JOB_RESOURCE_POWER = {
-    job: RESOURCE_POWER_CURVE for job in SUPPORTED_JOBS
-}
+
+def _build_job_curve(job_name: str) -> list[tuple[float, float]]:
+    """Derive a slightly perturbed resource/power curve per job.
+
+    Uses a deterministic PRNG seeded by the job name so results are
+    reproducible run-to-run.
+    """
+
+    rng = random.Random(job_name)
+    curve: list[tuple[float, float]] = []
+    prev_res = 0.0
+    last_index = len(BASE_RESOURCE_POWER_CURVE) - 1
+
+    for idx, (resource, power) in enumerate(BASE_RESOURCE_POWER_CURVE):
+        # Apply small additive tweak while maintaining monotonic increase.
+        delta = rng.uniform(-0.015, 0.015)
+        adjusted_res = resource + delta
+        adjusted_res = min(max(adjusted_res, prev_res + 0.002), 1.0)
+        if idx == last_index:
+            adjusted_res = 1.0
+        prev_res = adjusted_res
+
+        # Scale power within ±8% to simulate job-specific power response.
+        power_scale = 1.0 + rng.uniform(-0.08, 0.08)
+        adjusted_power = max(power * power_scale, 0.0)
+
+        curve.append((adjusted_res, adjusted_power))
+
+    return curve
+
+
+JOB_RESOURCE_POWER = {job: _build_job_curve(job) for job in SUPPORTED_JOBS}
 
 
 class MPRMarketManager:
