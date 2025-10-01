@@ -155,12 +155,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--pdu-user",
-        default="apc",
+        default=os.getenv("PDU_USER"),
         help="Username for APC PDU access (falls back to $PDU_USER)",
     )
     parser.add_argument(
         "--pdu-password",
-        default="ridl123",
+        default=os.getenv("PDU_PASSWORD"),
         help="Password for APC PDU access (falls back to $PDU_PASSWORD)",
     )
     parser.add_argument(
@@ -191,6 +191,48 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--detect-overload",
         action="store_true",
         help="Enable overload detection heuristics",
+    )
+    parser.add_argument(
+        "--threshold-w",
+        type=float,
+        default=900.0,
+        help="High threshold for overload detection (watts)",
+    )
+    parser.add_argument(
+        "--hysteresis-w",
+        type=float,
+        default=20.0,
+        help="Watts to drop below threshold before ending overload",
+    )
+    parser.add_argument(
+        "--min-over",
+        type=int,
+        default=5,
+        help="Seconds above threshold required to declare overload",
+    )
+    parser.add_argument(
+        "--cooldown",
+        type=int,
+        default=30,
+        help="Seconds after overload ends before re-triggering",
+    )
+    parser.add_argument(
+        "--spike-threshold-w",
+        type=float,
+        default=None,
+        help="Spike threshold watts (optional)",
+    )
+    parser.add_argument(
+        "--spike-margin-w",
+        type=float,
+        default=50.0,
+        help="Spike margin watts",
+    )
+    parser.add_argument(
+        "--spike-persistence",
+        type=float,
+        default=1.0,
+        help="Seconds a spike must persist before warning",
     )
     parser.add_argument(
         "--shed-watts",
@@ -262,6 +304,13 @@ def _make_power_monitor(args: argparse.Namespace) -> Optional[PowerMonitor]:
         interval=args.power_interval,
         deadline=args.power_deadline,
         detect_overload=args.detect_overload,
+        threshold_w=args.threshold_w,
+        hysteresis_w=args.hysteresis_w,
+        min_over_s=args.min_over,
+        cooldown_s=args.cooldown,
+        spike_threshold_w=args.spike_threshold_w,
+        spike_margin_w=args.spike_margin_w,
+        spike_persistence_s=args.spike_persistence,
         shed_watts=args.shed_watts,
         shed_margin=args.shed_margin,
         shed_delay=args.shed_delay,
