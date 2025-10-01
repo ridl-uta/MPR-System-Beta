@@ -86,11 +86,29 @@ class MainController:
                     except AttributeError:
                         events = []
                 for evt in events:
-                    logging.info("[PowerEvent] %s", evt.get("message", evt))
+                    self._handle_power_event(evt)
                 time.sleep(1)
         except KeyboardInterrupt:
             logging.info("MainController interrupted")
             self.stop()
+
+    def _handle_power_event(self, event: dict) -> None:
+        """React to power monitor events; extend with site-specific logic."""
+
+        name = (event.get("event") or "").upper()
+        message = event.get("message") or name
+
+        if name == "OVERLOAD_START":
+            logging.warning("[PowerEvent][START] %s", message)
+            # TODO: add mitigation logic (e.g., request DVFS reductions)
+        elif name == "OVERLOAD_HANDLED":
+            logging.info("[PowerEvent][HANDLED] %s", message)
+            # TODO: optional: confirm mitigation success or log metrics
+        elif name == "OVERLOAD_END":
+            logging.info("[PowerEvent][END] %s", message)
+            # TODO: optional: restore state if changes were made at start
+        else:
+            logging.info("[PowerEvent] %s", message)
 
 
 # ---------------------------------------------------------------------------
