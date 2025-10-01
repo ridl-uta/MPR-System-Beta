@@ -9,6 +9,7 @@ from .job_utilities import (
     SetJobFrequencyError,
     apply_reduction,
     collect_host_cores,
+    list_running_slurm_jobs,
     compute_frequency_from_reduction,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "SetJobFrequencyError",
     "apply_reduction",
     "collect_host_cores",
+    "list_running_slurm_jobs",
     "compute_frequency_from_reduction",
 ]
