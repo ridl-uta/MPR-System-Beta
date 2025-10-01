@@ -155,12 +155,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--pdu-user",
-        default=os.getenv("PDU_USER"),
+        default="apc",
         help="Username for APC PDU access (falls back to $PDU_USER)",
     )
     parser.add_argument(
         "--pdu-password",
-        default=os.getenv("PDU_PASSWORD"),
+        default="ridl123",
         help="Password for APC PDU access (falls back to $PDU_PASSWORD)",
     )
     parser.add_argument(
