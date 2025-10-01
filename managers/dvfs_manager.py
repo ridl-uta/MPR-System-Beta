@@ -39,6 +39,7 @@ class BidRequest:
     job_id: str
     bid: float
     dry_run: bool
+    direct: bool = False
 
 
 class DVFSManager:
@@ -88,7 +89,17 @@ class DVFSManager:
         dry_run: bool = False,
     ) -> None:
         """Queue a bid for asynchronous processing."""
-        self._queue.put(BidRequest(job_id, bid, dry_run))
+        self._queue.put(BidRequest(job_id, bid, dry_run, False))
+
+    def submit_reduction(
+        self,
+        job_id: str,
+        reduction: float,
+        *,
+        dry_run: bool = False,
+    ) -> None:
+        """Queue a direct reduction (fraction between 0 and 1)."""
+        self._queue.put(BidRequest(job_id, reduction, dry_run, True))
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -107,7 +118,10 @@ class DVFSManager:
                 self._queue.task_done()
 
     def _process_request(self, request: BidRequest) -> None:
-        reduction = self._compute_reduction(request.bid)
+        if request.direct:
+            reduction = min(max(request.bid, 0.0), 1.0)
+        else:
+            reduction = self._compute_reduction(request.bid)
 
         freq_hz, freq_mhz, _ = compute_frequency_from_reduction(
             reduction,

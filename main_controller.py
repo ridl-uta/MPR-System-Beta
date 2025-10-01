@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from managers import DVFSManager, MPRMarketManager, PowerMonitor
+from dvfs import list_running_slurm_jobs
 
 # Default artefacts live alongside the repository.
 _REPO_ROOT = Path(__file__).resolve().parent
@@ -100,7 +101,7 @@ class MainController:
 
         if name == "OVERLOAD_START":
             logging.warning("[PowerEvent][START] %s", message)
-            # TODO: add mitigation logic (e.g., request DVFS reductions)
+            self._trigger_overload_reduction(event)
         elif name == "OVERLOAD_HANDLED":
             logging.info("[PowerEvent][HANDLED] %s", message)
             # TODO: optional: confirm mitigation success or log metrics
@@ -109,6 +110,35 @@ class MainController:
             # TODO: optional: restore state if changes were made at start
         else:
             logging.info("[PowerEvent] %s", message)
+
+    def _trigger_overload_reduction(self, event: dict) -> None:
+        """Kick off a DVFS reduction when overload starts."""
+
+        if not self.dvfs_manager:
+            logging.warning("[PowerEvent] DVFS manager unavailable; cannot reduce load")
+            return
+
+        try:
+            jobs = list_running_slurm_jobs()
+        except Exception as exc:
+            logging.error("[PowerEvent] Failed to list Slurm jobs: %s", exc)
+            return
+
+        if not jobs:
+            logging.info("[PowerEvent] No running jobs to reduce")
+            return
+
+        reductions = self.market_manager.plan_reductions(jobs)
+        if not reductions:
+            logging.info("[PowerEvent] No reduction plan generated")
+            return
+
+        logging.info("[PowerEvent] Applying DVFS reductions: %s", reductions)
+        for job_id, reduction in reductions.items():
+            try:
+                self.dvfs_manager.submit_reduction(job_id, reduction)
+            except Exception as exc:
+                logging.error("[PowerEvent] Failed to submit reduction for job %s: %s", job_id, exc)
 
 
 # ---------------------------------------------------------------------------
