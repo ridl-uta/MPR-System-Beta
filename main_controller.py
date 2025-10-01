@@ -79,6 +79,14 @@ class MainController:
         logging.info("MainController entering run loop")
         try:
             while not self._stop.is_set():
+                events = []
+                if self.power_monitor:
+                    try:
+                        events = self.power_monitor.consume_events()
+                    except AttributeError:
+                        events = []
+                for evt in events:
+                    logging.info("[PowerEvent] %s", evt.get("message", evt))
                 time.sleep(1)
         except KeyboardInterrupt:
             logging.info("MainController interrupted")

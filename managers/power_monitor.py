@@ -12,8 +12,9 @@ import re
 import telnetlib
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Iterable, List, Optional
+from typing import Deque, Dict, Iterable, List, Optional
 
 try:  # Prefer absolute imports when package layout is flat
     from overload_detection.overload_detection import make_simple_overload_ctx, simple_overload_update
@@ -179,6 +180,8 @@ class PowerMonitor:
         self._command: Optional[str] = None
         self._od_ctx = None
         self._load_shedder: Optional[LoadShedder] = None
+        self._event_lock = threading.Lock()
+        self._event_buffer: Deque[Dict[str, object]] = deque(maxlen=128)
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -351,19 +354,35 @@ class PowerMonitor:
             payload = info or {}
             if self.events_csv:
                 self._write_event(payload)
-            self._log(
+            message = (
                 f"{ts_iso} OVERLOAD_END dur={payload.get('duration_s', 0):.1f}s "
                 f"avg={payload.get('avg_watts', 0):.1f}W peak={payload.get('peak_watts', 0):.1f}W"
             )
+            self._record_event('OVERLOAD_END', ts_iso, payload, message)
+            self._log(message)
         elif event == 'OVERLOAD_START':
-            self._log(
+            payload = {
+                'raw_watts': raw_total,
+                'adjusted_watts': adjusted_total,
+                'threshold_high': self._od_ctx['T_high'],
+                'threshold_low': self._od_ctx['T_low'],
+            }
+            message = (
                 f"{ts_iso} OVERLOAD_START raw={raw_total:.1f}W adjusted={adjusted_total:.1f}W "
                 f"T_high={self._od_ctx['T_high']:.1f}W T_low={self._od_ctx['T_low']:.1f}W"
             )
+            self._record_event('OVERLOAD_START', ts_iso, payload, message)
+            self._log(message)
         elif event == 'OVERLOAD_HANDLED':
-            self._log(
+            payload = {
+                'raw_watts': raw_total,
+                'adjusted_watts': adjusted_total,
+            }
+            message = (
                 f"{ts_iso} OVERLOAD_HANDLED raw={raw_total:.1f}W adjusted={adjusted_total:.1f}W"
             )
+            self._record_event('OVERLOAD_HANDLED', ts_iso, payload, message)
+            self._log(message)
         elif event == 'RAMP_PREDICTED':
             payload = info or {}
             self._log(
@@ -382,6 +401,36 @@ class PowerMonitor:
                 f"{ts_iso} SPIKE_WARNING raw={raw_total:.1f}W adjusted={adjusted_total:.1f}W "
                 f"threshold={payload.get('threshold', 0):.1f}W duration={payload.get('duration_s', 0):.1f}s"
             )
+
+    def _record_event(
+        self,
+        name: str,
+        ts_iso: str,
+        payload: Dict[str, object],
+        message: str,
+    ) -> None:
+        entry: Dict[str, object] = {
+            "timestamp": ts_iso,
+            "event": name,
+            "payload": payload,
+            "message": message,
+        }
+        with self._event_lock:
+            self._event_buffer.append(entry)
+
+    def consume_events(self) -> List[Dict[str, object]]:
+        """Return and clear accumulated overload events."""
+
+        with self._event_lock:
+            events = list(self._event_buffer)
+            self._event_buffer.clear()
+        return events
+
+    def peek_events(self) -> List[Dict[str, object]]:
+        """Return accumulated overload events without clearing."""
+
+        with self._event_lock:
+            return list(self._event_buffer)
 
     def _write_event(self, info: dict) -> None:
         if not self.events_csv:
