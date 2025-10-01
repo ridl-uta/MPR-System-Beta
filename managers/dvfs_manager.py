@@ -98,8 +98,9 @@ class DVFSManager:
         *,
         dry_run: bool = False,
     ) -> None:
-        """Queue a direct reduction (fraction between 0 and 1)."""
-        self._queue.put(BidRequest(job_id, reduction, dry_run, True))
+        """Apply a direct reduction immediately (fraction between 0 and 1)."""
+        reduction = self._normalize_reduction(reduction)
+        self._execute_reduction(job_id, reduction, dry_run)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -119,10 +120,21 @@ class DVFSManager:
 
     def _process_request(self, request: BidRequest) -> None:
         if request.direct:
-            reduction = min(max(request.bid, 0.0), 1.0)
+            reduction = self._normalize_reduction(request.bid)
         else:
             reduction = self._compute_reduction(request.bid)
 
+        self._execute_reduction(request.job_id, reduction, request.dry_run)
+
+    def _compute_reduction(self, bid: float) -> float:
+        reduction = supply(bid, q=self.q, delta=self.delta)
+        reduction = min(max(reduction, 0.0), 1.0)
+        return reduction
+
+    def _normalize_reduction(self, reduction: float) -> float:
+        return min(max(reduction, 0.0), 1.0)
+
+    def _execute_reduction(self, job_id: str, reduction: float, dry_run: bool) -> None:
         freq_hz, freq_mhz, _ = compute_frequency_from_reduction(
             reduction,
             max_freq_mhz=self.max_freq_mhz,
@@ -130,14 +142,14 @@ class DVFSManager:
         )
 
         print(
-            f"[DVFS] job {request.job_id}: reduction {reduction:.3f} -> {freq_mhz:.3f} MHz"
+            f"[DVFS] job {job_id}: reduction {reduction:.3f} -> {freq_mhz:.3f} MHz"
         )
 
         try:
             apply_reduction(
-                request.job_id,
+                job_id,
                 reduction,
-                dry_run=request.dry_run,
+                dry_run=dry_run,
                 max_freq_mhz=self.max_freq_mhz,
                 min_freq_mhz=self.min_freq_mhz,
                 conf_dir=self.conf_dir,
@@ -147,11 +159,6 @@ class DVFSManager:
             raise RuntimeError(str(exc)) from exc
         except Exception as exc:
             raise RuntimeError(str(exc)) from exc
-
-    def _compute_reduction(self, bid: float) -> float:
-        reduction = supply(bid, q=self.q, delta=self.delta)
-        reduction = min(max(reduction, 0.0), 1.0)
-        return reduction
 
 
 # ----------------------------------------------------------------------
