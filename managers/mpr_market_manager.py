@@ -43,7 +43,7 @@ BASE_RESOURCE_POWER_CURVE = [
 SUPPORTED_JOBS = {
     "minife",
     "comd",
-    "xsbench",
+    "xs-omp",
     "swfft",
     "hpccg",
     "simplemoc",
