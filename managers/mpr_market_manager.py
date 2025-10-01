@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import random
 import threading
+from typing import Dict, Iterable, List, Tuple
 
 
 VALID_MPR_MODES = {"mpr_stat", "mpr_int"}
@@ -45,7 +46,7 @@ SUPPORTED_JOBS = {
     "xsbench",
     "swfft",
     "hpccg",
-    "simpleMOC",
+    "simplemoc",
 }
 
 
@@ -130,3 +131,37 @@ class MPRMarketManager:
         """Periodic placeholder. Extend with market logic as needed."""
         # No-op by default; hook for future functionality.
         pass
+
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
+    def plan_reductions(
+        self,
+        jobs: Iterable[Tuple[str, str]],
+    ) -> Dict[str, float]:
+        """Return job_id -> reduction mapping using the per-job curves.
+
+        For ``mpr_stat`` we choose the midpoint entry of the curve. For
+        ``mpr_int`` we bias toward a more aggressive reduction (75th percentile).
+        Jobs that are not in ``SUPPORTED_JOBS`` are skipped.
+        """
+
+        reductions: Dict[str, float] = {}
+
+        for job_id, job_name in jobs:
+            name_key = (job_name or "").split()[0].lower()
+            if name_key not in JOB_RESOURCE_POWER:
+                continue
+
+            curve = JOB_RESOURCE_POWER[name_key]
+            if not curve:
+                continue
+
+            if self.mpr_mode == "mpr_int":
+                index = min(len(curve) - 1, int(len(curve) * 0.75))
+            else:
+                index = len(curve) // 2
+
+            reductions[job_id] = curve[index][0]
+
+        return reductions
