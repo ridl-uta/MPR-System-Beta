@@ -154,6 +154,29 @@ def collect_host_cores(jobid: str) -> tuple[str, Dict[str, List[int]]]:
     return state, host_map
 
 
+def list_running_slurm_jobs() -> List[Tuple[str, str]]:
+    """Return (job_id, job_name) tuples for all running Slurm jobs."""
+
+    proc = _run_command(["squeue", "-h", "-t", "RUNNING", "-o", "%i %j"])
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip()
+        raise RuntimeError(
+            f"squeue failed with exit {proc.returncode}: {stderr or 'no details'}"
+        )
+
+    jobs: List[Tuple[str, str]] = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        job_id = parts[0]
+        job_name = parts[1] if len(parts) > 1 else ""
+        jobs.append((job_id, job_name))
+
+    return jobs
+
+
 # ---------------------------------------------------------------------------
 # Frequency apply helpers (formerly set_job_frequency.py)
 # ---------------------------------------------------------------------------
@@ -310,6 +333,7 @@ __all__ = [
     "CONFIG_DIR_DEFAULT",
     "NODES_FILE_DEFAULT",
     "collect_host_cores",
+    "list_running_slurm_jobs",
     "expand_list",
     "sanitize_host",
     "compute_frequency_from_reduction",
