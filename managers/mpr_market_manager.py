@@ -12,13 +12,19 @@ import threading
 import time
 
 
+VALID_MPR_MODES = {"mpr_stat", "mpr_int"}
+
+
 class MPRMarketManager:
     """Market manager with start/stop lifecycle and background thread."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, mpr_mode: str = "mpr_stat") -> None:
+        if mpr_mode not in VALID_MPR_MODES:
+            raise ValueError(f"mpr_mode must be one of {sorted(VALID_MPR_MODES)}")
         self._running = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self.mpr_mode = mpr_mode
 
     def start(self) -> None:
         """Start background thread (idempotent)."""
