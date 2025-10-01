@@ -5,6 +5,7 @@
       "host": "192.168.2.243",
       "port": 23,
       "map": {
+        "1": "ridlserver01",
         "2": "ridlserver02",
         "4": "ridlserver04",
         "5": "ridlserver05",
@@ -16,6 +17,7 @@
       "host": "192.168.2.242",
       "port": 23,
       "map": {
+        "1": "ridlserver01",
         "2": "ridlserver02",
         "4": "ridlserver04",
         "5": "ridlserver05",
