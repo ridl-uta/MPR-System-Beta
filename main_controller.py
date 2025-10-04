@@ -46,6 +46,7 @@ class MainController:
         mode: str = "run_experiment",
         collect_idle_baseline: bool = False,
         idle_sample_seconds: int = 60,
+        record_output_csv: Optional[Path] = None,
     ) -> None:
         self._stop = threading.Event()
         self.power_monitor = power_monitor or PowerMonitor()
@@ -56,6 +57,7 @@ class MainController:
         self.collect_idle_baseline = collect_idle_baseline
         self.idle_sample_seconds = idle_sample_seconds
         self.idle_power_baseline: Optional[Dict[str, float]] = None
+        self.record_output_csv = record_output_csv
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -362,7 +364,63 @@ class MainController:
         )
 
         self._performance_results.append(record)
+        self._append_record_csv(record)
         return record
+
+    def _append_record_csv(self, record: dict) -> None:
+        if not self.record_output_csv:
+            return
+
+        path = Path(self.record_output_csv)
+
+        row = dict(record)
+        idle = row.pop("idle_power_w", None)
+        if idle:
+            for node, value in idle.items():
+                row[f"idle_{node}"] = value
+
+        for key in ("start", "end"):
+            value = row.get(key)
+            if isinstance(value, datetime):
+                row[key] = value.isoformat()
+
+        base_fields = [
+            "job_id",
+            "job_name",
+            "freq_mhz",
+            "reduction",
+            "start",
+            "end",
+            "duration_s",
+            "avg_power_w",
+        ]
+        idle_fields = sorted(k for k in row.keys() if k.startswith("idle_"))
+        extra_fields = [k for k in row.keys() if k not in base_fields + idle_fields]
+        fieldnames = base_fields + idle_fields + extra_fields
+
+        existing_fields: List[str] = []
+        if path.exists() and path.stat().st_size > 0:
+            with path.open(newline="") as f:
+                reader = csv.reader(f)
+                try:
+                    existing_fields = next(reader)
+                except StopIteration:
+                    existing_fields = []
+        if existing_fields:
+            fieldnames = existing_fields
+            for key in fieldnames:
+                row.setdefault(key, "")
+        else:
+            for key in fieldnames:
+                row.setdefault(key, "")
+
+        need_header = not path.exists() or path.stat().st_size == 0 or not existing_fields
+
+        with path.open("a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if need_header:
+                writer.writeheader()
+            writer.writerow({fn: row.get(fn, "") for fn in fieldnames})
 
     def _freq_to_reduction(self, freq_mhz: float) -> float:
         if not self.dvfs_manager:
@@ -593,6 +651,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Seconds to sample idle power when recording baseline",
     )
     parser.add_argument(
+        "--record-output-csv",
+        type=Path,
+        default=None,
+        help="Optional CSV path to append performance records",
+    )
+    parser.add_argument(
         "--shed-watts",
         type=float,
         default=0.0,
@@ -721,6 +785,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         mode=args.mode,
         collect_idle_baseline=args.record_idle_baseline,
         idle_sample_seconds=args.idle_sample_seconds,
+        record_output_csv=args.record_output_csv,
     )
 
     _install_signal_handlers(controller)
