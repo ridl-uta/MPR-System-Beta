@@ -39,11 +39,13 @@ class MainController:
         power_monitor: Optional[PowerMonitor] = None,
         dvfs_manager: Optional[DVFSManager] = None,
         market_manager: Optional[MPRMarketManager] = None,
+        mode: str = "run_experiment",
     ) -> None:
         self._stop = threading.Event()
         self.power_monitor = power_monitor or PowerMonitor()
         self.dvfs_manager = dvfs_manager or DVFSManager()
         self.market_manager = market_manager or MPRMarketManager()
+        self.mode = mode
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -328,9 +330,7 @@ def _make_dvfs_manager(args: argparse.Namespace) -> Optional[DVFSManager]:
     if args.disable_dvfs:
         logging.info("DVFS manager disabled via CLI flag")
         return None
-    manager = DVFSManager()
-    manager.mode = args.mode
-    return manager
+    return DVFSManager()
 
 
 def _make_market_manager(args: argparse.Namespace) -> Optional[MPRMarketManager]:
