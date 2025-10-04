@@ -79,21 +79,32 @@ class MainController:
                 logging.exception("Failed to stop %s", name)
 
     def run(self) -> None:
-        logging.info("MainController entering run loop")
+        logging.info("MainController entering run loop (%s mode)", self.mode)
         try:
-            while not self._stop.is_set():
-                events = []
-                if self.power_monitor:
-                    try:
-                        events = self.power_monitor.consume_events()
-                    except AttributeError:
-                        events = []
-                for evt in events:
-                    self._handle_power_event(evt)
-                time.sleep(1)
+            if self.mode == "record_performance":
+                self._run_record_performance()
+            else:
+                self._run_experiment()
         except KeyboardInterrupt:
             logging.info("MainController interrupted")
             self.stop()
+
+    def _run_experiment(self) -> None:
+        while not self._stop.is_set():
+            events = []
+            if self.power_monitor:
+                try:
+                    events = self.power_monitor.consume_events()
+                except AttributeError:
+                    events = []
+            for evt in events:
+                self._handle_power_event(evt)
+            time.sleep(1)
+
+    def _run_record_performance(self) -> None:
+        while not self._stop.is_set():
+            # Placeholder for record_performance behavior
+            time.sleep(1)
 
     def _handle_power_event(self, event: dict) -> None:
         """React to power monitor events; extend with site-specific logic."""
