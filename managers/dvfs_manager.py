@@ -35,6 +35,7 @@ class DVFSManager:
         self.conf_dir = conf_dir
         self.nodes_file = Path(nodes_file)
         self._running = False
+        self.mode = "run_experiment"
 
     # ------------------------------------------------------------------
     # Lifecycle hooks (no-op today, kept for interface parity)

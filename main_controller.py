@@ -272,6 +272,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=os.getenv("MAIN_CONTROLLER_LOG", "INFO"),
         help="Logging level (DEBUG, INFO, WARNING, ...)",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["run_experiment", "record_performance"],
+        default="run_experiment",
+        help="Controller mode: run_experiment or record_performance",
+    )
     return parser
 
 
@@ -322,7 +328,9 @@ def _make_dvfs_manager(args: argparse.Namespace) -> Optional[DVFSManager]:
     if args.disable_dvfs:
         logging.info("DVFS manager disabled via CLI flag")
         return None
-    return DVFSManager()
+    manager = DVFSManager()
+    manager.mode = args.mode
+    return manager
 
 
 def _make_market_manager(args: argparse.Namespace) -> Optional[MPRMarketManager]:
