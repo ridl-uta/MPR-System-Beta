@@ -207,6 +207,14 @@ class MainController:
         return max(0.0, min(1.0, 1.0 - target_hz / max_hz))
 
     def _execute_recording_cycle(self, cmd: list[str], reduction: float, freq_mhz: float) -> Optional[dict]:
+        required_cores = self._cores_required_from_cmd(cmd)
+        if not self._wait_for_resources(required_cores):
+            logging.error(
+                "[Record] Insufficient resources for job (%s cores needed); skipping",
+                required_cores,
+            )
+            return None
+
         submit = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if submit.returncode != 0 or "Submitted batch job" not in submit.stdout:
             logging.error("[Record] sbatch failed: %s %s", submit.stdout.strip(), submit.stderr.strip())
@@ -392,6 +400,61 @@ class MainController:
         logging.info("[Record] Idle baseline total=%.1fW", total_avg)
         for node, value in node_avgs.items():
             logging.info("[Record] Idle baseline %s=%.1fW", node, value)
+
+    def _cores_required_from_cmd(self, cmd: list[str]) -> int:
+        ntasks = 1
+        cpus_per_task = 1
+        for arg in cmd:
+            if arg.startswith("--ntasks="):
+                try:
+                    ntasks = int(arg.split("=", 1)[1])
+                except ValueError:
+                    continue
+            elif arg.startswith("--cpus-per-task="):
+                try:
+                    cpus_per_task = int(arg.split("=", 1)[1])
+                except ValueError:
+                    continue
+        return max(1, ntasks * cpus_per_task)
+
+    def _wait_for_resources(
+        self,
+        required_cores: int,
+        *,
+        timeout: int = 300,
+        poll_interval: int = 5,
+    ) -> bool:
+        deadline = time.time() + timeout
+        while not self._stop.is_set() and time.time() < deadline:
+            proc = subprocess.run(
+                ["sinfo", "-h", "-o", "%C"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0:
+                logging.error(
+                    "[Record] sinfo failed while checking resources: %s",
+                    proc.stderr.strip(),
+                )
+                return False
+
+            idle_cores = 0
+            for line in proc.stdout.splitlines():
+                parts = line.strip().split('/')
+                if len(parts) >= 2:
+                    try:
+                        idle_cores += int(parts[1])
+                    except ValueError:
+                        continue
+
+            if idle_cores >= required_cores:
+                return True
+
+            time.sleep(poll_interval)
+
+        return False
 
 
 # ---------------------------------------------------------------------------
