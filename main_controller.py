@@ -12,16 +12,20 @@ can be used as a long-running service.
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import os
 import signal
+import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Optional
 
+from datetime import datetime, timezone
+
 from managers import DVFSManager, MPRMarketManager, PowerMonitor
-from dvfs import list_running_slurm_jobs
+from dvfs import list_running_slurm_jobs, build_sbatch_variations
 
 # Default artefacts live alongside the repository.
 _REPO_ROOT = Path(__file__).resolve().parent
@@ -46,6 +50,7 @@ class MainController:
         self.dvfs_manager = dvfs_manager or DVFSManager()
         self.market_manager = market_manager or MPRMarketManager()
         self.mode = mode
+        self._performance_results = []
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -102,9 +107,38 @@ class MainController:
             time.sleep(1)
 
     def _run_record_performance(self) -> None:
+        commands = build_sbatch_variations()
+        if not commands:
+            logging.warning("[Record] No Slurm scripts found; exiting record mode")
+            return
+
+        if not self.dvfs_manager:
+            logging.warning("[Record] DVFS manager unavailable; cannot record")
+            return
+
+        freq_targets_mhz = [2200, 2000, 1800, 1600, 1500]
+        results = []
+
         while not self._stop.is_set():
-            # Placeholder for record_performance behavior
-            time.sleep(1)
+            for freq_mhz in freq_targets_mhz:
+                reduction = self._freq_to_reduction(freq_mhz)
+                for cmd in commands:
+                    if self._stop.is_set():
+                        break
+                    record = self._execute_recording_cycle(cmd, reduction, freq_mhz)
+                    if record:
+                        results.append(record)
+            # After one full sweep, log summary and sleep before next
+            if results:
+                logging.info("[Record] Completed sweep; %d records", len(results))
+                for rec in results:
+                    logging.info(
+                        "[Record] job=%s freq=%.1fMHz duration=%.1fs avg_power=%s", \
+                        rec.get("job_name"), rec.get("freq_mhz"), rec.get("duration_s"), rec.get("avg_power_w")
+                    )
+                self._performance_results.extend(results)
+                results = []
+            time.sleep(5)
 
     def _handle_power_event(self, event: dict) -> None:
         """React to power monitor events; extend with site-specific logic."""
@@ -152,6 +186,110 @@ class MainController:
                 self.dvfs_manager.submit_reduction(job_id, reduction)
             except Exception as exc:
                 logging.error("[PowerEvent] Failed to submit reduction for job %s: %s", job_id, exc)
+
+    def _freq_to_reduction(self, freq_mhz: float) -> float:
+        if not self.dvfs_manager:
+            return 0.0
+        max_hz = self.dvfs_manager.max_freq_mhz * 1e6
+        min_hz = self.dvfs_manager.min_freq_mhz * 1e6
+        target_hz = max(freq_mhz * 1e6, min_hz)
+        target_hz = min(target_hz, max_hz)
+        if max_hz <= 0:
+            return 0.0
+        return max(0.0, min(1.0, 1.0 - target_hz / max_hz))
+
+    def _execute_recording_cycle(self, cmd: list[str], reduction: float, freq_mhz: float) -> Optional[dict]:
+        submit = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if submit.returncode != 0 or "Submitted batch job" not in submit.stdout:
+            logging.error("[Record] sbatch failed: %s %s", submit.stdout.strip(), submit.stderr.strip())
+            return None
+
+        job_id = submit.stdout.strip().split()[-1]
+        start_time = datetime.now(timezone.utc)
+
+        try:
+            self.dvfs_manager.submit_reduction(job_id, reduction)
+        except Exception as exc:
+            logging.error("[Record] Failed to apply reduction for job %s: %s", job_id, exc)
+
+        self._wait_for_job_completion(job_id)
+
+        end_time = datetime.now(timezone.utc)
+        duration = (end_time - start_time).total_seconds()
+        avg_power = self._compute_avg_power(start_time, end_time)
+
+        record = {
+            "job_id": job_id,
+            "job_name": cmd[-1],
+            "freq_mhz": freq_mhz,
+            "reduction": reduction,
+            "duration_s": duration,
+            "avg_power_w": avg_power,
+        }
+        logging.info(
+            "[Record] Completed job %s freq=%.1fMHz duration=%.1fs avg_power=%s",
+            job_id,
+            freq_mhz,
+            duration,
+            avg_power,
+        )
+        return record
+
+    def _wait_for_job_completion(self, job_id: str) -> None:
+        while not self._stop.is_set():
+            proc = subprocess.run(
+                ["squeue", "-h", "-j", job_id],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0 or not proc.stdout.strip():
+                break
+            time.sleep(5)
+
+    def _compute_avg_power(self, start: datetime, end: datetime) -> Optional[float]:
+        if not self.power_monitor or not getattr(self.power_monitor, "csv_path", None):
+            return None
+
+        csv_path = Path(self.power_monitor.csv_path)  # type: ignore[attr-defined]
+        if not csv_path.exists():
+            return None
+
+        try:
+            with csv_path.open() as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                if not header:
+                    return None
+                try:
+                    total_idx = header.index("total_watts")
+                except ValueError:
+                    total_idx = len(header) - 1
+
+                samples = []
+                for row in reader:
+                    if len(row) <= total_idx:
+                        continue
+                    ts_text = row[0]
+                    try:
+                        ts = datetime.fromisoformat(ts_text)
+                    except ValueError:
+                        continue
+                    ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                    if ts < start or ts > end:
+                        continue
+                    try:
+                        samples.append(float(row[total_idx]))
+                    except ValueError:
+                        continue
+
+                if not samples:
+                    return None
+                return sum(samples) / len(samples)
+        except Exception as exc:
+            logging.error("[Record] Failed to compute avg power: %s", exc)
+            return None
 
 
 # ---------------------------------------------------------------------------

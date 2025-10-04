@@ -325,6 +325,53 @@ def apply_reduction(
     raise SetJobFrequencyError("one or more srun invocations failed")
 
 
+def build_sbatch_variations(
+    script_list_path: Path | str = Path("data/slurm_scripts.txt"),
+    cores_per_rank: int = 10,
+) -> List[List[str]]:
+    """Generate sbatch commands for common rank/node configurations.
+
+    Variations:
+      (a) 1 rank / 1 node  -> ntasks=1,  ntasks-per-node=1
+      (b) 2 ranks / 1 node -> ntasks=2,  ntasks-per-node=2
+      (c) 4 ranks / 2 nodes-> ntasks=4,  ntasks-per-node=2, nodes=2
+
+    Returns a list of command argument lists suitable for subprocess.run.
+    """
+
+    variations = [
+        ("1r1n", 1, 1, 1),  # label, nodes, ntasks, ntasks_per_node
+        ("2r1n", 1, 2, 2),
+        ("4r2n", 2, 4, 2),
+    ]
+
+    slurm_file = Path(script_list_path)
+    if not slurm_file.exists():
+        raise FileNotFoundError(f"slurm script list not found: {slurm_file}")
+
+    commands: List[List[str]] = []
+    with slurm_file.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            script_path = Path(line)
+            label_base = script_path.stem
+            for suffix, nodes, ntasks, ntasks_per_node in variations:
+                cmd = [
+                    "sbatch",
+                    f"--nodes={nodes}",
+                    f"--ntasks={ntasks}",
+                    f"--ntasks-per-node={ntasks_per_node}",
+                    f"--cpus-per-task={cores_per_rank}",
+                    f"--job-name={label_base}_{suffix}",
+                    str(script_path),
+                ]
+                commands.append(cmd)
+
+    return commands
+
+
 __all__ = [
     "JobCoresError",
     "SetJobFrequencyError",
@@ -338,4 +385,5 @@ __all__ = [
     "sanitize_host",
     "compute_frequency_from_reduction",
     "apply_reduction",
+    "build_sbatch_variations",
 ]
