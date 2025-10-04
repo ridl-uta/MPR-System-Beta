@@ -19,10 +19,10 @@ import signal
 import subprocess
 import threading
 import time
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional
-
-from datetime import datetime, timezone
+from typing import Dict, Optional, Tuple
 
 from managers import DVFSManager, MPRMarketManager, PowerMonitor
 from dvfs import list_running_slurm_jobs, build_sbatch_variations
@@ -44,6 +44,8 @@ class MainController:
         dvfs_manager: Optional[DVFSManager] = None,
         market_manager: Optional[MPRMarketManager] = None,
         mode: str = "run_experiment",
+        collect_idle_baseline: bool = False,
+        idle_sample_seconds: int = 60,
     ) -> None:
         self._stop = threading.Event()
         self.power_monitor = power_monitor or PowerMonitor()
@@ -51,6 +53,9 @@ class MainController:
         self.market_manager = market_manager or MPRMarketManager()
         self.mode = mode
         self._performance_results = []
+        self.collect_idle_baseline = collect_idle_baseline
+        self.idle_sample_seconds = idle_sample_seconds
+        self.idle_power_baseline: Optional[Dict[str, float]] = None
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -115,6 +120,9 @@ class MainController:
         if not self.dvfs_manager:
             logging.warning("[Record] DVFS manager unavailable; cannot record")
             return
+
+        if self.collect_idle_baseline and self.idle_power_baseline is None:
+            self._collect_idle_power_baseline(self.idle_sample_seconds)
 
         freq_targets_mhz = [2200, 2000, 1800, 1600, 1500]
         results = []
@@ -226,6 +234,8 @@ class MainController:
             "duration_s": duration,
             "avg_power_w": avg_power,
         }
+        if self.idle_power_baseline:
+            record["idle_power_w"] = dict(self.idle_power_baseline)
         logging.info(
             "[Record] Completed job %s freq=%.1fMHz duration=%.1fs avg_power=%s",
             job_id,
@@ -249,6 +259,15 @@ class MainController:
             time.sleep(5)
 
     def _compute_avg_power(self, start: datetime, end: datetime) -> Optional[float]:
+        result = self._compute_power_averages(start, end)
+        if not result:
+            return None
+        total_avg, _ = result
+        return total_avg
+
+    def _compute_power_averages(
+        self, start: datetime, end: datetime
+    ) -> Optional[Tuple[float, Dict[str, float]]]:
         if not self.power_monitor or not getattr(self.power_monitor, "csv_path", None):
             return None
 
@@ -260,14 +279,19 @@ class MainController:
             with csv_path.open() as f:
                 reader = csv.reader(f)
                 header = next(reader, None)
-                if not header:
+                if not header or len(header) < 2:
                     return None
+
                 try:
                     total_idx = header.index("total_watts")
                 except ValueError:
                     total_idx = len(header) - 1
 
-                samples = []
+                node_names = header[1:total_idx]
+                sums = defaultdict(float)
+                totals = 0.0
+                count = 0
+
                 for row in reader:
                     if len(row) <= total_idx:
                         continue
@@ -279,17 +303,57 @@ class MainController:
                     ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
                     if ts < start or ts > end:
                         continue
+
+                    valid = True
+                    node_values = {}
+                    for idx, name in enumerate(node_names, start=1):
+                        try:
+                            node_values[name] = float(row[idx])
+                        except ValueError:
+                            valid = False
+                            break
+                    if not valid:
+                        continue
                     try:
-                        samples.append(float(row[total_idx]))
+                        totals += float(row[total_idx])
                     except ValueError:
                         continue
+                    for name, value in node_values.items():
+                        sums[name] += value
+                    count += 1
 
-                if not samples:
+                if count == 0:
                     return None
-                return sum(samples) / len(samples)
+
+                node_avgs = {name: sums[name] / count for name in node_names}
+                total_avg = totals / count
+                return total_avg, node_avgs
         except Exception as exc:
-            logging.error("[Record] Failed to compute avg power: %s", exc)
+            logging.error("[Record] Failed to compute power averages: %s", exc)
             return None
+
+    def _collect_idle_power_baseline(self, duration_seconds: int) -> None:
+        if not self.power_monitor:
+            logging.warning("[Record] Cannot collect idle baseline without power monitor")
+            return
+
+        logging.info("[Record] Collecting idle baseline for %ds", duration_seconds)
+        start = datetime.now(timezone.utc)
+        deadline = start + timedelta(seconds=duration_seconds)
+        while not self._stop.is_set() and datetime.now(timezone.utc) < deadline:
+            time.sleep(1)
+
+        end = datetime.now(timezone.utc)
+        averages = self._compute_power_averages(start, end)
+        if not averages:
+            logging.warning("[Record] Unable to compute idle baseline")
+            return
+
+        total_avg, node_avgs = averages
+        self.idle_power_baseline = node_avgs
+        logging.info("[Record] Idle baseline total=%.1fW", total_avg)
+        for node, value in node_avgs.items():
+            logging.info("[Record] Idle baseline %s=%.1fW", node, value)
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +448,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Seconds a spike must persist before warning",
+    )
+    parser.add_argument(
+        "--record-idle-baseline",
+        action="store_true",
+        help="Record idle power baseline before performance runs",
+    )
+    parser.add_argument(
+        "--idle-sample-seconds",
+        type=int,
+        default=60,
+        help="Seconds to sample idle power when recording baseline",
     )
     parser.add_argument(
         "--shed-watts",
@@ -511,6 +586,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         power_monitor=_make_power_monitor(args) or PowerMonitor(),
         dvfs_manager=_make_dvfs_manager(args) or DVFSManager(),
         market_manager=_make_market_manager(args) or MPRMarketManager(),
+        mode=args.mode,
+        collect_idle_baseline=args.record_idle_baseline,
+        idle_sample_seconds=args.idle_sample_seconds,
     )
 
     _install_signal_handlers(controller)
