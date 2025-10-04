@@ -215,10 +215,13 @@ class MainController:
         job_id = submit.stdout.strip().split()[-1]
         start_time = datetime.now(timezone.utc)
 
-        try:
-            self.dvfs_manager.submit_reduction(job_id, reduction)
-        except Exception as exc:
-            logging.error("[Record] Failed to apply reduction for job %s: %s", job_id, exc)
+        if self._wait_for_job_state(job_id, {"RUNNING"}, timeout=300):
+            try:
+                self.dvfs_manager.submit_reduction(job_id, reduction)
+            except Exception as exc:
+                logging.error("[Record] Failed to apply reduction for job %s: %s", job_id, exc)
+        else:
+            logging.error("[Record] Job %s did not reach RUNNING state; skipping DVFS apply", job_id)
 
         self._wait_for_job_completion(job_id)
 
@@ -257,6 +260,41 @@ class MainController:
             if proc.returncode != 0 or not proc.stdout.strip():
                 break
             time.sleep(5)
+
+    def _wait_for_job_state(
+        self,
+        job_id: str,
+        desired_states: set[str],
+        *,
+        timeout: int = 300,
+    ) -> bool:
+        """Poll squeue until job enters desired_states or timeout expires."""
+
+        deadline = time.time() + timeout
+        while not self._stop.is_set() and time.time() < deadline:
+            proc = subprocess.run(
+                ["squeue", "-h", "-j", job_id, "-o", "%T"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0:
+                logging.error(
+                    "[Record] squeue failed while waiting for %s: %s",
+                    job_id,
+                    proc.stderr.strip(),
+                )
+                return False
+            state = proc.stdout.strip()
+            if not state:
+                return False
+            if state in desired_states:
+                return True
+            if state in {"COMPLETED", "FAILED", "CANCELLED"}:
+                return False
+            time.sleep(5)
+        return False
 
     def _compute_avg_power(self, start: datetime, end: datetime) -> Optional[float]:
         result = self._compute_power_averages(start, end)
