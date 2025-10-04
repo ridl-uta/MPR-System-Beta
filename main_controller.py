@@ -19,10 +19,10 @@ import signal
 import subprocess
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from managers import DVFSManager, MPRMarketManager, PowerMonitor
 from dvfs import list_running_slurm_jobs, build_sbatch_variations
@@ -125,28 +125,63 @@ class MainController:
             self._collect_idle_power_baseline(self.idle_sample_seconds)
 
         freq_targets_mhz = [2200, 2000, 1800, 1600, 1500]
-        results = []
+        tasks = deque(
+            {
+                "cmd": cmd,
+                "freq_mhz": freq_mhz,
+                "reduction": self._freq_to_reduction(freq_mhz),
+            }
+            for freq_mhz in freq_targets_mhz
+            for cmd in commands
+        )
 
-        while not self._stop.is_set():
-            for freq_mhz in freq_targets_mhz:
-                reduction = self._freq_to_reduction(freq_mhz)
-                for cmd in commands:
-                    if self._stop.is_set():
-                        break
-                    record = self._execute_recording_cycle(cmd, reduction, freq_mhz)
-                    if record:
-                        results.append(record)
-            # After one full sweep, log summary and sleep before next
-            if results:
-                logging.info("[Record] Completed sweep; %d records", len(results))
-                for rec in results:
-                    logging.info(
-                        "[Record] job=%s freq=%.1fMHz duration=%.1fs avg_power=%s", \
-                        rec.get("job_name"), rec.get("freq_mhz"), rec.get("duration_s"), rec.get("avg_power_w")
+        running_jobs: Dict[str, dict] = {}
+        completed_records = []
+
+        while not self._stop.is_set() and (tasks or running_jobs):
+            completed = self._update_running_jobs(running_jobs)
+            if completed:
+                completed_records.extend(completed)
+
+            launched = 0
+            while tasks:
+                next_task = tasks[0]
+                required = self._cores_required_from_cmd(next_task["cmd"])
+                if not self._has_resources(required):
+                    break
+                tasks.popleft()
+                job_entry = self._submit_record_job(
+                    next_task["cmd"],
+                    next_task["reduction"],
+                    next_task["freq_mhz"],
+                )
+                if job_entry:
+                    running_jobs[job_entry["job_id"]] = job_entry
+                    launched += 1
+                else:
+                    logging.error(
+                        "[Record] Failed to submit job command: %s",
+                        " ".join(next_task["cmd"]),
                     )
-                self._performance_results.extend(results)
-                results = []
-            time.sleep(5)
+            if launched:
+                logging.info(
+                    "[Record] Launched %d job(s); running=%d pending=%d",
+                    launched,
+                    len(running_jobs),
+                    len(tasks),
+                )
+
+            if not tasks and not running_jobs:
+                break
+
+            time.sleep(2)
+
+        completed = self._update_running_jobs(running_jobs)
+        if completed:
+            completed_records.extend(completed)
+
+        if completed_records:
+            logging.info("[Record] Completed %d jobs total", len(completed_records))
 
     def _handle_power_event(self, event: dict) -> None:
         """React to power monitor events; extend with site-specific logic."""
@@ -195,6 +230,140 @@ class MainController:
             except Exception as exc:
                 logging.error("[PowerEvent] Failed to submit reduction for job %s: %s", job_id, exc)
 
+    def _submit_record_job(
+        self,
+        cmd: list[str],
+        reduction: float,
+        freq_mhz: float,
+    ) -> Optional[dict]:
+        logging.info("[Record] Submitting job: %s", " ".join(cmd))
+        submit = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if submit.returncode != 0 or "Submitted batch job" not in submit.stdout:
+            logging.error("[Record] sbatch failed: %s %s", submit.stdout.strip(), submit.stderr.strip())
+            return None
+
+        job_id = submit.stdout.strip().split()[-1]
+        return {
+            "job_id": job_id,
+            "cmd": cmd,
+            "freq_mhz": freq_mhz,
+            "reduction": reduction,
+            "submitted_at": datetime.now(timezone.utc),
+            "start_time": None,
+            "dvfs_applied": False,
+        }
+
+    def _update_running_jobs(self, running_jobs: Dict[str, dict]) -> List[dict]:
+        completed_records: List[dict] = []
+        terminal_states = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"}
+
+        for job_id in list(running_jobs.keys()):
+            entry = running_jobs[job_id]
+            state = self._poll_job_state(job_id)
+
+            if state is None:
+                record = self._finalize_record(entry)
+                completed_records.append(record)
+                running_jobs.pop(job_id, None)
+                continue
+
+            entry["last_state"] = state
+
+            if state == "RUNNING" and not entry.get("dvfs_applied"):
+                if self.dvfs_manager:
+                    try:
+                        self.dvfs_manager.submit_reduction(job_id, entry["reduction"])
+                        entry["dvfs_applied"] = True
+                        entry["start_time"] = datetime.now(timezone.utc)
+                        logging.info(
+                            "[Record] Applied reduction %.3f to job %s",
+                            entry["reduction"],
+                            job_id,
+                        )
+                    except Exception as exc:
+                        logging.error("[Record] Failed to apply reduction for job %s: %s", job_id, exc)
+            elif state in terminal_states:
+                record = self._finalize_record(entry)
+                completed_records.append(record)
+                running_jobs.pop(job_id, None)
+
+        return completed_records
+
+    def _poll_job_state(self, job_id: str) -> Optional[str]:
+        proc = subprocess.run(
+            ["squeue", "-h", "-j", job_id, "-o", "%T"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            logging.error(
+                "[Record] squeue failed while polling job %s: %s",
+                job_id,
+                proc.stderr.strip(),
+            )
+            return None
+        state = proc.stdout.strip()
+        return state or None
+
+    def _has_resources(self, required_cores: int) -> bool:
+        proc = subprocess.run(
+            ["sinfo", "-h", "-o", "%C"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            logging.error(
+                "[Record] sinfo failed while checking resources: %s",
+                proc.stderr.strip(),
+            )
+            return False
+
+        idle_cores = 0
+        for line in proc.stdout.splitlines():
+            parts = line.strip().split('/')
+            if len(parts) >= 2:
+                try:
+                    idle_cores += int(parts[1])
+                except ValueError:
+                    continue
+        return idle_cores >= required_cores
+
+    def _finalize_record(self, entry: dict) -> dict:
+        job_id = entry.get("job_id")
+        start_time = entry.get("start_time") or entry.get("submitted_at") or datetime.now(timezone.utc)
+        end_time = datetime.now(timezone.utc)
+        freq_mhz = entry.get("freq_mhz")
+        reduction = entry.get("reduction")
+        avg_power = self._compute_avg_power(start_time, end_time)
+
+        record = {
+            "job_id": job_id,
+            "job_name": entry.get("cmd", [])[-1] if entry.get("cmd") else None,
+            "freq_mhz": freq_mhz,
+            "reduction": reduction,
+            "start": start_time,
+            "end": end_time,
+            "duration_s": (end_time - start_time).total_seconds(),
+            "avg_power_w": avg_power,
+        }
+        if self.idle_power_baseline:
+            record["idle_power_w"] = dict(self.idle_power_baseline)
+
+        logging.info(
+            "[Record] Job %s freq=%.1fMHz duration=%.1fs avg_power=%s",
+            job_id,
+            freq_mhz,
+            record["duration_s"],
+            avg_power,
+        )
+
+        self._performance_results.append(record)
+        return record
+
     def _freq_to_reduction(self, freq_mhz: float) -> float:
         if not self.dvfs_manager:
             return 0.0
@@ -205,104 +374,6 @@ class MainController:
         if max_hz <= 0:
             return 0.0
         return max(0.0, min(1.0, 1.0 - target_hz / max_hz))
-
-    def _execute_recording_cycle(self, cmd: list[str], reduction: float, freq_mhz: float) -> Optional[dict]:
-        required_cores = self._cores_required_from_cmd(cmd)
-        if not self._wait_for_resources(required_cores):
-            logging.error(
-                "[Record] Insufficient resources for job (%s cores needed); skipping",
-                required_cores,
-            )
-            return None
-
-        submit = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if submit.returncode != 0 or "Submitted batch job" not in submit.stdout:
-            logging.error("[Record] sbatch failed: %s %s", submit.stdout.strip(), submit.stderr.strip())
-            return None
-
-        job_id = submit.stdout.strip().split()[-1]
-        start_time = datetime.now(timezone.utc)
-
-        if self._wait_for_job_state(job_id, {"RUNNING"}, timeout=300):
-            try:
-                self.dvfs_manager.submit_reduction(job_id, reduction)
-            except Exception as exc:
-                logging.error("[Record] Failed to apply reduction for job %s: %s", job_id, exc)
-        else:
-            logging.error("[Record] Job %s did not reach RUNNING state; skipping DVFS apply", job_id)
-
-        self._wait_for_job_completion(job_id)
-
-        end_time = datetime.now(timezone.utc)
-        duration = (end_time - start_time).total_seconds()
-        avg_power = self._compute_avg_power(start_time, end_time)
-
-        record = {
-            "job_id": job_id,
-            "job_name": cmd[-1],
-            "freq_mhz": freq_mhz,
-            "reduction": reduction,
-            "duration_s": duration,
-            "avg_power_w": avg_power,
-        }
-        if self.idle_power_baseline:
-            record["idle_power_w"] = dict(self.idle_power_baseline)
-        logging.info(
-            "[Record] Completed job %s freq=%.1fMHz duration=%.1fs avg_power=%s",
-            job_id,
-            freq_mhz,
-            duration,
-            avg_power,
-        )
-        return record
-
-    def _wait_for_job_completion(self, job_id: str) -> None:
-        while not self._stop.is_set():
-            proc = subprocess.run(
-                ["squeue", "-h", "-j", job_id],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-            if proc.returncode != 0 or not proc.stdout.strip():
-                break
-            time.sleep(5)
-
-    def _wait_for_job_state(
-        self,
-        job_id: str,
-        desired_states: set[str],
-        *,
-        timeout: int = 300,
-    ) -> bool:
-        """Poll squeue until job enters desired_states or timeout expires."""
-
-        deadline = time.time() + timeout
-        while not self._stop.is_set() and time.time() < deadline:
-            proc = subprocess.run(
-                ["squeue", "-h", "-j", job_id, "-o", "%T"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-            if proc.returncode != 0:
-                logging.error(
-                    "[Record] squeue failed while waiting for %s: %s",
-                    job_id,
-                    proc.stderr.strip(),
-                )
-                return False
-            state = proc.stdout.strip()
-            if not state:
-                return False
-            if state in desired_states:
-                return True
-            if state in {"COMPLETED", "FAILED", "CANCELLED"}:
-                return False
-            time.sleep(5)
-        return False
 
     def _compute_avg_power(self, start: datetime, end: datetime) -> Optional[float]:
         result = self._compute_power_averages(start, end)
@@ -416,46 +487,6 @@ class MainController:
                 except ValueError:
                     continue
         return max(1, ntasks * cpus_per_task)
-
-    def _wait_for_resources(
-        self,
-        required_cores: int,
-        *,
-        timeout: int = 300,
-        poll_interval: int = 5,
-    ) -> bool:
-        deadline = time.time() + timeout
-        while not self._stop.is_set() and time.time() < deadline:
-            proc = subprocess.run(
-                ["sinfo", "-h", "-o", "%C"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-            if proc.returncode != 0:
-                logging.error(
-                    "[Record] sinfo failed while checking resources: %s",
-                    proc.stderr.strip(),
-                )
-                return False
-
-            idle_cores = 0
-            for line in proc.stdout.splitlines():
-                parts = line.strip().split('/')
-                if len(parts) >= 2:
-                    try:
-                        idle_cores += int(parts[1])
-                    except ValueError:
-                        continue
-
-            if idle_cores >= required_cores:
-                return True
-
-            time.sleep(poll_interval)
-
-        return False
-
 
 # ---------------------------------------------------------------------------
 # CLI helpers
