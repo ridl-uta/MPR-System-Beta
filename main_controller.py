@@ -341,6 +341,7 @@ class MainController:
         freq_mhz = entry.get("freq_mhz")
         reduction = entry.get("reduction")
         avg_power = self._compute_avg_power(start_time, end_time)
+        nodes = self._get_job_nodes(job_id)
 
         record = {
             "job_id": job_id,
@@ -352,6 +353,8 @@ class MainController:
             "duration_s": (end_time - start_time).total_seconds(),
             "avg_power_w": avg_power,
         }
+        if nodes:
+            record["nodes"] = nodes
         if self.idle_power_baseline:
             record["idle_power_w"] = dict(self.idle_power_baseline)
 
@@ -366,6 +369,30 @@ class MainController:
         self._performance_results.append(record)
         self._append_record_csv(record)
         return record
+
+    def _get_job_nodes(self, job_id: Optional[str]) -> Optional[str]:
+        if not job_id:
+            return None
+        proc = subprocess.run(
+            ["scontrol", "show", "job", "-o", job_id],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            logging.error(
+                "[Record] scontrol failed while querying nodes for %s: %s",
+                job_id,
+                proc.stderr.strip(),
+            )
+            return None
+
+        output = proc.stdout.strip()
+        for token in output.split():
+            if token.startswith("NodeList="):
+                return token.split("=", 1)[1]
+        return None
 
     def _append_record_csv(self, record: dict) -> None:
         if not self.record_output_csv:
