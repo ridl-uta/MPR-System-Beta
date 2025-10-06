@@ -99,6 +99,7 @@ class MainController:
                 self._run_experiment()
         except KeyboardInterrupt:
             logging.info("MainController interrupted")
+        finally:
             self.stop()
 
     def _run_experiment(self) -> None:
@@ -114,76 +115,79 @@ class MainController:
             time.sleep(1)
 
     def _run_record_performance(self) -> None:
-        commands = build_sbatch_variations()
-        if not commands:
-            logging.warning("[Record] No Slurm scripts found; exiting record mode")
-            return
+        try:
+            commands = build_sbatch_variations()
+            if not commands:
+                logging.warning("[Record] No Slurm scripts found; exiting record mode")
+                return
 
-        if not self.dvfs_manager:
-            logging.warning("[Record] DVFS manager unavailable; cannot record")
-            return
+            if not self.dvfs_manager:
+                logging.warning("[Record] DVFS manager unavailable; cannot record")
+                return
 
-        if self.collect_idle_baseline and self.idle_power_baseline is None:
-            self._collect_idle_power_baseline(self.idle_sample_seconds)
+            if self.collect_idle_baseline and self.idle_power_baseline is None:
+                self._collect_idle_power_baseline(self.idle_sample_seconds)
 
-        freq_targets_mhz = [2200, 2000, 1800, 1600, 1500]
-        tasks = deque(
-            {
-                "cmd": cmd,
-                "freq_mhz": freq_mhz,
-                "reduction": self._freq_to_reduction(freq_mhz),
-            }
-            for freq_mhz in freq_targets_mhz
-            for cmd in commands
-        )
+            freq_targets_mhz = [2200, 2000, 1800, 1600, 1500]
+            tasks = deque(
+                {
+                    "cmd": cmd,
+                    "freq_mhz": freq_mhz,
+                    "reduction": self._freq_to_reduction(freq_mhz),
+                }
+                for freq_mhz in freq_targets_mhz
+                for cmd in commands
+            )
 
-        running_jobs: Dict[str, dict] = {}
-        completed_records = []
+            running_jobs: Dict[str, dict] = {}
+            completed_records = []
 
-        while not self._stop.is_set() and (tasks or running_jobs):
+            while not self._stop.is_set() and (tasks or running_jobs):
+                completed = self._update_running_jobs(running_jobs)
+                if completed:
+                    completed_records.extend(completed)
+
+                launched = 0
+                while tasks:
+                    next_task = tasks[0]
+                    required = self._cores_required_from_cmd(next_task["cmd"])
+                    if not self._has_resources(required):
+                        break
+                    tasks.popleft()
+                    job_entry = self._submit_record_job(
+                        next_task["cmd"],
+                        next_task["reduction"],
+                        next_task["freq_mhz"],
+                    )
+                    if job_entry:
+                        running_jobs[job_entry["job_id"]] = job_entry
+                        launched += 1
+                    else:
+                        logging.error(
+                            "[Record] Failed to submit job command: %s",
+                            " ".join(next_task["cmd"]),
+                        )
+                if launched:
+                    logging.info(
+                        "[Record] Launched %d job(s); running=%d pending=%d",
+                        launched,
+                        len(running_jobs),
+                        len(tasks),
+                    )
+
+                if not tasks and not running_jobs:
+                    break
+
+                time.sleep(2)
+
             completed = self._update_running_jobs(running_jobs)
             if completed:
                 completed_records.extend(completed)
 
-            launched = 0
-            while tasks:
-                next_task = tasks[0]
-                required = self._cores_required_from_cmd(next_task["cmd"])
-                if not self._has_resources(required):
-                    break
-                tasks.popleft()
-                job_entry = self._submit_record_job(
-                    next_task["cmd"],
-                    next_task["reduction"],
-                    next_task["freq_mhz"],
-                )
-                if job_entry:
-                    running_jobs[job_entry["job_id"]] = job_entry
-                    launched += 1
-                else:
-                    logging.error(
-                        "[Record] Failed to submit job command: %s",
-                        " ".join(next_task["cmd"]),
-                    )
-            if launched:
-                logging.info(
-                    "[Record] Launched %d job(s); running=%d pending=%d",
-                    launched,
-                    len(running_jobs),
-                    len(tasks),
-                )
-
-            if not tasks and not running_jobs:
-                break
-
-            time.sleep(2)
-
-        completed = self._update_running_jobs(running_jobs)
-        if completed:
-            completed_records.extend(completed)
-
-        if completed_records:
-            logging.info("[Record] Completed %d jobs total", len(completed_records))
+            if completed_records:
+                logging.info("[Record] Completed %d jobs total", len(completed_records))
+        finally:
+            self.stop()
 
     def _handle_power_event(self, event: dict) -> None:
         """React to power monitor events; extend with site-specific logic."""
