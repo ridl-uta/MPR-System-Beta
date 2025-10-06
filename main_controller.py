@@ -22,7 +22,7 @@ import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from managers import DVFSManager, MPRMarketManager, PowerMonitor
 from dvfs import list_running_slurm_jobs, build_sbatch_variations
@@ -340,8 +340,18 @@ class MainController:
         end_time = datetime.now(timezone.utc)
         freq_mhz = entry.get("freq_mhz")
         reduction = entry.get("reduction")
-        avg_power = self._compute_avg_power(start_time, end_time)
-        nodes = self._get_job_nodes(job_id)
+        node_list = None
+        node_hosts: Optional[List[str]] = None
+        if job_id:
+            node_info = self._get_job_nodes(job_id)
+            if node_info:
+                node_list, node_hosts = node_info
+
+        avg_power = self._compute_avg_power(
+            start_time,
+            end_time,
+            node_hosts if node_hosts else None,
+        )
 
         record = {
             "job_id": job_id,
@@ -353,8 +363,8 @@ class MainController:
             "duration_s": (end_time - start_time).total_seconds(),
             "avg_power_w": avg_power,
         }
-        if nodes:
-            record["nodes"] = nodes
+        if node_list:
+            record["nodes"] = node_list
         if self.idle_power_baseline:
             record["idle_power_w"] = dict(self.idle_power_baseline)
 
@@ -370,7 +380,7 @@ class MainController:
         self._append_record_csv(record)
         return record
 
-    def _get_job_nodes(self, job_id: Optional[str]) -> Optional[str]:
+    def _get_job_nodes(self, job_id: Optional[str]) -> Optional[Tuple[str, List[str]]]:
         if not job_id:
             return None
         proc = subprocess.run(
@@ -389,10 +399,33 @@ class MainController:
             return None
 
         output = proc.stdout.strip()
+        node_list: Optional[str] = None
         for token in output.split():
             if token.startswith("NodeList="):
-                return token.split("=", 1)[1]
-        return None
+                node_list = token.split("=", 1)[1]
+                break
+
+        if not node_list or node_list == "(null)":
+            return None
+
+        hosts_proc = subprocess.run(
+            ["scontrol", "show", "hostnames", node_list],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        hosts: List[str] = []
+        if hosts_proc.returncode != 0:
+            logging.debug(
+                "[Record] scontrol hostnames failed for %s: %s",
+                node_list,
+                hosts_proc.stderr.strip(),
+            )
+        else:
+            hosts = [line.strip() for line in hosts_proc.stdout.splitlines() if line.strip()]
+
+        return node_list, hosts
 
     def _append_record_csv(self, record: dict) -> None:
         if not self.record_output_csv:
@@ -460,15 +493,23 @@ class MainController:
             return 0.0
         return max(0.0, min(1.0, 1.0 - target_hz / max_hz))
 
-    def _compute_avg_power(self, start: datetime, end: datetime) -> Optional[float]:
-        result = self._compute_power_averages(start, end)
+    def _compute_avg_power(
+        self,
+        start: datetime,
+        end: datetime,
+        node_filter: Optional[Iterable[str]] = None,
+    ) -> Optional[float]:
+        result = self._compute_power_averages(start, end, node_filter=node_filter)
         if not result:
             return None
         total_avg, _ = result
         return total_avg
 
     def _compute_power_averages(
-        self, start: datetime, end: datetime
+        self,
+        start: datetime,
+        end: datetime,
+        node_filter: Optional[Iterable[str]] = None,
     ) -> Optional[Tuple[float, Dict[str, float]]]:
         if not self.power_monitor or not getattr(self.power_monitor, "csv_path", None):
             return None
@@ -490,6 +531,20 @@ class MainController:
                     total_idx = len(header) - 1
 
                 node_names = header[1:total_idx]
+                allowed_nodes = {name.strip() for name in node_filter} if node_filter else None
+                selected_nodes = node_names
+                filter_active = False
+                if allowed_nodes is not None:
+                    selected_nodes = [name for name in node_names if name in allowed_nodes]
+                    if selected_nodes:
+                        filter_active = True
+                    else:
+                        logging.warning(
+                            "[Record] No power columns matched nodes %s; using rack total",
+                            sorted(allowed_nodes),
+                        )
+                        selected_nodes = node_names
+
                 sums = defaultdict(float)
                 totals = 0.0
                 count = 0
@@ -516,10 +571,14 @@ class MainController:
                             break
                     if not valid:
                         continue
-                    try:
-                        totals += float(row[total_idx])
-                    except ValueError:
-                        continue
+                    if filter_active:
+                        # Focus the total on the job's nodes instead of the rack-wide aggregate.
+                        totals += sum(node_values.get(name, 0.0) for name in selected_nodes)
+                    else:
+                        try:
+                            totals += float(row[total_idx])
+                        except ValueError:
+                            continue
                     for name, value in node_values.items():
                         sums[name] += value
                     count += 1
