@@ -56,3 +56,21 @@ python3 -m main_controller \
     --events-csv output/overload_events.csv
 ```
 This collects a 45-second idle baseline, launches the sbatch variations listed in `data/slurm_scripts.txt`, applies GEOPM reductions as jobs start, and appends per-job metrics to `output/perf_results.csv`.
+
+## Overload Detection Experiments
+To monitor live power and trigger DVFS reductions when thresholds are exceeded:
+```
+python3 -m main_controller \
+    --mode run_experiment \
+    --detect-overload \
+    --threshold-w 850 \
+    --hysteresis-w 40 \
+    --min-over 5 \
+    --cooldown 30 \
+    --pdu-map data/mapping.json \
+    --pdu-user apc \
+    --pdu-password ridl123 \
+    --pdu-csv output/pdu_log.csv \
+    --events-csv output/overload_events.csv
+```
+With these flags the controller streams PDU data, raises events when sustained load crosses 850 W, and calls the market + DVFS managers to reduce job frequencies until the overload is handled.
