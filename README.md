@@ -40,3 +40,19 @@ Minimal runbook to install the one‑shot service on nodes and trigger applies f
 - Writes fail without sudo: ensure user has GEOPM write perms (`geopmaccess -l`) or run via service with sudo.
 - No config found: confirm `/shared/geopm/freq/<hostname>.conf` exists on the node.
 - GEOPM daemon not running: check `sudo systemctl status geopmd.service`.
+
+## Record Performance Runs
+To sweep job/frequency combinations and log runtime + average power:
+```
+python3 -m main_controller \
+    --mode record_performance \
+    --record-idle-baseline \
+    --idle-sample-seconds 45 \
+    --record-output-csv output/perf_results.csv \
+    --pdu-map data/mapping.json \
+    --pdu-user apc \
+    --pdu-password ridl123 \
+    --pdu-csv output/pdu_log.csv \
+    --events-csv output/overload_events.csv
+```
+This collects a 45-second idle baseline, launches the sbatch variations listed in `data/slurm_scripts.txt`, applies GEOPM reductions as jobs start, and appends per-job metrics to `output/perf_results.csv`.
