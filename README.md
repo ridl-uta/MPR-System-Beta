@@ -44,7 +44,7 @@ Minimal runbook to install the one‑shot service on nodes and trigger applies f
 ## Record Performance Runs
 To sweep job/frequency combinations and log runtime + average power:
 ```
-python3 -m main_controller \
+nohup python3 -m main_controller \
     --mode record_performance \
     --record-idle-baseline \
     --idle-sample-seconds 45 \
@@ -53,14 +53,15 @@ python3 -m main_controller \
     --pdu-user apc \
     --pdu-password ridl123 \
     --pdu-csv output/pdu_log.csv \
-    --events-csv output/overload_events.csv
+    --events-csv output/overload_events.csv \
+    > main_controller.log 2>&1 &
 ```
 This collects a 45-second idle baseline, launches the sbatch variations listed in `data/slurm_scripts.txt`, applies GEOPM reductions as jobs start, and appends per-job metrics to `output/perf_results.csv`.
 
 ## Overload Detection Experiments
 To monitor live power and trigger DVFS reductions when thresholds are exceeded:
 ```
-python3 -m main_controller \
+nohup python3 -m main_controller \
     --mode run_experiment \
     --detect-overload \
     --threshold-w 850 \
@@ -71,6 +72,7 @@ python3 -m main_controller \
     --pdu-user apc \
     --pdu-password ridl123 \
     --pdu-csv output/pdu_log.csv \
-    --events-csv output/overload_events.csv
+    --events-csv output/overload_events.csv \
+    > main_controller.log 2>&1 &
 ```
 With these flags the controller streams PDU data, raises events when sustained load crosses 850 W, and calls the market + DVFS managers to reduce job frequencies until the overload is handled.
