@@ -360,6 +360,7 @@ def build_sbatch_variations(
             for suffix, nodes, ntasks, ntasks_per_node in variations:
                 cmd = [
                     "sbatch",
+                    "--exclusive",
                     f"--nodes={nodes}",
                     f"--ntasks={ntasks}",
                     f"--ntasks-per-node={ntasks_per_node}",

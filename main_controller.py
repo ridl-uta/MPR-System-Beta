@@ -560,8 +560,14 @@ class MainController:
     def _cores_required_from_cmd(self, cmd: list[str]) -> int:
         ntasks = 1
         cpus_per_task = 1
+        nodes = 1
         for arg in cmd:
-            if arg.startswith("--ntasks="):
+            if arg.startswith("--nodes="):
+                try:
+                    nodes = int(arg.split("=", 1)[1])
+                except ValueError:
+                    continue
+            elif arg.startswith("--ntasks="):
                 try:
                     ntasks = int(arg.split("=", 1)[1])
                 except ValueError:
@@ -571,7 +577,7 @@ class MainController:
                     cpus_per_task = int(arg.split("=", 1)[1])
                 except ValueError:
                     continue
-        return max(1, ntasks * cpus_per_task)
+        return max(1, nodes * ntasks * cpus_per_task)
 
 # ---------------------------------------------------------------------------
 # CLI helpers
