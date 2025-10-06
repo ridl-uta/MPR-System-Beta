@@ -340,12 +340,15 @@ class MainController:
         end_time = datetime.now(timezone.utc)
         freq_mhz = entry.get("freq_mhz")
         reduction = entry.get("reduction")
-        node_list = None
+        node_list: Optional[str] = None
         node_hosts: Optional[List[str]] = None
+        rank_count = self._ntasks_from_cmd(entry.get("cmd", []))
         if job_id:
             node_info = self._get_job_nodes(job_id)
             if node_info:
-                node_list, node_hosts = node_info
+                node_list, node_hosts, node_tasks = node_info
+                if rank_count is None and node_tasks is not None:
+                    rank_count = node_tasks
 
         avg_power = self._compute_avg_power(
             start_time,
@@ -365,6 +368,8 @@ class MainController:
         }
         if node_list:
             record["nodes"] = node_list
+        if rank_count is not None:
+            record["rank_count"] = rank_count
         if self.idle_power_baseline:
             record["idle_power_w"] = dict(self.idle_power_baseline)
 
@@ -380,7 +385,9 @@ class MainController:
         self._append_record_csv(record)
         return record
 
-    def _get_job_nodes(self, job_id: Optional[str]) -> Optional[Tuple[str, List[str]]]:
+    def _get_job_nodes(
+        self, job_id: Optional[str]
+    ) -> Optional[Tuple[Optional[str], List[str], Optional[int]]]:
         if not job_id:
             return None
         proc = subprocess.run(
@@ -400,32 +407,42 @@ class MainController:
 
         output = proc.stdout.strip()
         node_list: Optional[str] = None
+        num_tasks: Optional[int] = None
         for token in output.split():
             if token.startswith("NodeList="):
                 node_list = token.split("=", 1)[1]
-                break
+            elif token.startswith("NumTasks="):
+                value = token.split("=", 1)[1]
+                try:
+                    num_tasks = int(value)
+                except ValueError:
+                    num_tasks = None
 
         if not node_list or node_list == "(null)":
+            node_list = None
+
+        hosts: List[str] = []
+        if node_list:
+            hosts_proc = subprocess.run(
+                ["scontrol", "show", "hostnames", node_list],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if hosts_proc.returncode != 0:
+                logging.debug(
+                    "[Record] scontrol hostnames failed for %s: %s",
+                    node_list,
+                    hosts_proc.stderr.strip(),
+                )
+            else:
+                hosts = [line.strip() for line in hosts_proc.stdout.splitlines() if line.strip()]
+
+        if node_list is None and num_tasks is None:
             return None
 
-        hosts_proc = subprocess.run(
-            ["scontrol", "show", "hostnames", node_list],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-        hosts: List[str] = []
-        if hosts_proc.returncode != 0:
-            logging.debug(
-                "[Record] scontrol hostnames failed for %s: %s",
-                node_list,
-                hosts_proc.stderr.strip(),
-            )
-        else:
-            hosts = [line.strip() for line in hosts_proc.stdout.splitlines() if line.strip()]
-
-        return node_list, hosts
+        return node_list, hosts, num_tasks
 
     def _append_record_csv(self, record: dict) -> None:
         if not self.record_output_csv:
@@ -452,6 +469,7 @@ class MainController:
             "start",
             "end",
             "duration_s",
+            "rank_count",
             "avg_power_w",
         ]
         idle_fields = sorted(k for k in row.keys() if k.startswith("idle_"))
@@ -459,6 +477,7 @@ class MainController:
         fieldnames = base_fields + idle_fields + extra_fields
 
         existing_fields: List[str] = []
+        existing_rows: List[Dict[str, str]] = []
         if path.exists() and path.stat().st_size > 0:
             with path.open(newline="") as f:
                 reader = csv.reader(f)
@@ -466,13 +485,19 @@ class MainController:
                     existing_fields = next(reader)
                 except StopIteration:
                     existing_fields = []
-        if existing_fields:
-            fieldnames = existing_fields
-            for key in fieldnames:
-                row.setdefault(key, "")
-        else:
-            for key in fieldnames:
-                row.setdefault(key, "")
+        if existing_fields and existing_fields != fieldnames:
+            with path.open(newline="") as f:
+                existing_rows = list(csv.DictReader(f))
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for existing_row in existing_rows:
+                    writer.writerow({fn: existing_row.get(fn, "") for fn in fieldnames})
+            existing_fields = fieldnames
+
+        for key in fieldnames:
+            if row.get(key) is None:
+                row[key] = ""
 
         need_header = not path.exists() or path.stat().st_size == 0 or not existing_fields
 
@@ -615,6 +640,17 @@ class MainController:
         logging.info("[Record] Idle baseline total=%.1fW", total_avg)
         for node, value in node_avgs.items():
             logging.info("[Record] Idle baseline %s=%.1fW", node, value)
+
+    def _ntasks_from_cmd(self, cmd: Optional[List[str]]) -> Optional[int]:
+        if not cmd:
+            return None
+        for arg in cmd:
+            if arg.startswith("--ntasks="):
+                try:
+                    return int(arg.split("=", 1)[1])
+                except ValueError:
+                    continue
+        return None
 
     def _cores_required_from_cmd(self, cmd: list[str]) -> int:
         ntasks = 1
