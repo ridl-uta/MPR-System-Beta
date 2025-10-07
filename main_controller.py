@@ -359,6 +359,15 @@ class MainController:
             end_time,
             node_hosts if node_hosts else None,
         )
+        net_power: Optional[float] = None
+        if (
+            avg_power is not None
+            and node_hosts
+            and self.idle_power_baseline
+            and all(host in self.idle_power_baseline for host in set(node_hosts))
+        ):
+            idle_sum = sum(self.idle_power_baseline[host] for host in set(node_hosts))
+            net_power = avg_power - idle_sum
 
         record = {
             "job_id": job_id,
@@ -369,6 +378,7 @@ class MainController:
             "end": end_time,
             "duration_s": (end_time - start_time).total_seconds(),
             "avg_power_w": avg_power,
+            "net_avg_power_w": net_power,
         }
         if node_list:
             record["nodes"] = node_list
@@ -475,6 +485,7 @@ class MainController:
             "duration_s",
             "rank_count",
             "avg_power_w",
+            "net_avg_power_w",
         ]
         idle_fields = sorted(k for k in row.keys() if k.startswith("idle_"))
         extra_fields = [k for k in row.keys() if k not in base_fields + idle_fields]
