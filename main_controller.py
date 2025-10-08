@@ -941,17 +941,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-        controller = MainController(
-            power_monitor=_make_power_monitor(args) or PowerMonitor(),
-            dvfs_manager=_make_dvfs_manager(args) or DVFSManager(),
-            market_manager=_make_market_manager(args) or MPRMarketManager(),
-            mode=args.mode,
-            collect_idle_baseline=args.record_idle_baseline,
-            idle_sample_seconds=args.idle_sample_seconds,
-            record_output_csv=args.record_output_csv,
-            record_nodelist=args.record_nodelist,
-            record_exclude=args.record_exclude,
-        )
+    controller = MainController(
+        power_monitor=_make_power_monitor(args) or PowerMonitor(),
+        dvfs_manager=_make_dvfs_manager(args) or DVFSManager(),
+        market_manager=_make_market_manager(args) or MPRMarketManager(),
+        mode=args.mode,
+        collect_idle_baseline=args.record_idle_baseline,
+        idle_sample_seconds=args.idle_sample_seconds,
+        record_output_csv=args.record_output_csv,
+        record_nodelist=args.record_nodelist,
+        record_exclude=args.record_exclude,
+    )
 
     _install_signal_handlers(controller)
     controller.start()
