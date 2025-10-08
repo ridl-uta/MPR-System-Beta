@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 # ---------------------------------------------------------------------------
 # Job core discovery (port of job_cores.py)
@@ -328,6 +328,9 @@ def apply_reduction(
 def build_sbatch_variations(
     script_list_path: Path | str = Path("data/slurm_scripts.txt"),
     cores_per_rank: int = 10,
+    *,
+    nodelist: Optional[str] = None,
+    exclude: Optional[str] = None,
 ) -> List[List[str]]:
     """Generate sbatch commands for common rank/node configurations.
 
@@ -365,9 +368,15 @@ def build_sbatch_variations(
                     f"--ntasks={ntasks}",
                     f"--ntasks-per-node={ntasks_per_node}",
                     f"--cpus-per-task={cores_per_rank}",
+                ]
+                if nodelist:
+                    cmd.append(f"--nodelist={nodelist}")
+                if exclude:
+                    cmd.append(f"--exclude={exclude}")
+                cmd.extend([
                     f"--job-name={label_base}_{suffix}",
                     str(script_path),
-                ]
+                ])
                 commands.append(cmd)
 
     return commands

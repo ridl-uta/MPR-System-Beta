@@ -47,6 +47,8 @@ class MainController:
         collect_idle_baseline: bool = False,
         idle_sample_seconds: int = 60,
         record_output_csv: Optional[Path] = None,
+        record_nodelist: Optional[str] = None,
+        record_exclude: Optional[str] = None,
     ) -> None:
         self._stop = threading.Event()
         self.power_monitor = power_monitor or PowerMonitor()
@@ -58,6 +60,8 @@ class MainController:
         self.idle_sample_seconds = idle_sample_seconds
         self.idle_power_baseline: Optional[Dict[str, float]] = None
         self.record_output_csv = record_output_csv
+        self.record_nodelist = record_nodelist
+        self.record_exclude = record_exclude
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -116,7 +120,11 @@ class MainController:
 
     def _run_record_performance(self) -> None:
         try:
-            commands = build_sbatch_variations()
+            commands = build_sbatch_variations(
+                nodelist=self.record_nodelist,
+                cores_per_rank=10,
+                exclude=self.record_exclude,
+            )
             if not commands:
                 logging.warning("[Record] No Slurm scripts found; exiting record mode")
                 return
@@ -800,6 +808,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Optional CSV path to append performance records",
     )
     parser.add_argument(
+        "--record-nodelist",
+        type=str,
+        default=None,
+        help="Optional Slurm --nodelist to pin record runs (e.g. ridlserver[01,04])",
+    )
+    parser.add_argument(
+        "--record-exclude",
+        type=str,
+        default=None,
+        help="Optional Slurm --exclude to avoid nodes during record runs",
+    )
+    parser.add_argument(
         "--shed-watts",
         type=float,
         default=0.0,
@@ -921,15 +941,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    controller = MainController(
-        power_monitor=_make_power_monitor(args) or PowerMonitor(),
-        dvfs_manager=_make_dvfs_manager(args) or DVFSManager(),
-        market_manager=_make_market_manager(args) or MPRMarketManager(),
-        mode=args.mode,
-        collect_idle_baseline=args.record_idle_baseline,
-        idle_sample_seconds=args.idle_sample_seconds,
-        record_output_csv=args.record_output_csv,
-    )
+        controller = MainController(
+            power_monitor=_make_power_monitor(args) or PowerMonitor(),
+            dvfs_manager=_make_dvfs_manager(args) or DVFSManager(),
+            market_manager=_make_market_manager(args) or MPRMarketManager(),
+            mode=args.mode,
+            collect_idle_baseline=args.record_idle_baseline,
+            idle_sample_seconds=args.idle_sample_seconds,
+            record_output_csv=args.record_output_csv,
+            record_nodelist=args.record_nodelist,
+            record_exclude=args.record_exclude,
+        )
 
     _install_signal_handlers(controller)
     controller.start()
