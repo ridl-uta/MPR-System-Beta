@@ -325,6 +325,56 @@ def apply_reduction(
     raise SetJobFrequencyError("one or more srun invocations failed")
 
 
+def _load_pinning_map(path: Path) -> Dict[str, Dict[str, str]]:
+    """Load per-variation node pinning from CSV or whitespace text.
+
+    CSV headers: variant,nodelist,exclude (case-insensitive).
+    Whitespace lines: "1r1n ridlserver01" or
+    "4r2n ridlserver[01,04] exclude=ridlserver02". Lines starting with # are ignored.
+    """
+    pin: Dict[str, Dict[str, str]] = {}
+    if not path.exists():
+        return pin
+    content = path.read_text().splitlines()
+    # Try CSV first
+    import csv
+    try:
+        rows = list(csv.DictReader(content))  # type: ignore[arg-type]
+    except Exception:
+        rows = []
+    if rows and rows[0]:
+        for row in rows:
+            keys = {k.lower(): (v or '').strip() for k, v in row.items() if k}
+            var = keys.get('variant', '')
+            if not var:
+                continue
+            info: Dict[str, str] = {}
+            if keys.get('nodelist'):
+                info['nodelist'] = keys['nodelist']
+            if keys.get('exclude'):
+                info['exclude'] = keys['exclude']
+            if info:
+                pin[var] = info
+        if pin:
+            return pin
+    # Fallback: whitespace format
+    for ln in content:
+        ln = ln.strip()
+        if not ln or ln.startswith('#'):
+            continue
+        parts = ln.split()
+        var = parts[0]
+        info: Dict[str, str] = {}
+        for token in parts[1:]:
+            if token.startswith('exclude='):
+                info['exclude'] = token.split('=', 1)[1]
+            else:
+                info['nodelist'] = token
+        if info:
+            pin[var] = info
+    return pin
+
+
 def build_sbatch_variations(
     script_list_path: Path | str = Path("data/slurm_scripts.txt"),
     cores_per_rank: int = 10,
@@ -353,6 +403,8 @@ def build_sbatch_variations(
         raise FileNotFoundError(f"slurm script list not found: {slurm_file}")
 
     commands: List[List[str]] = []
+    # Optional per-variation pinning map
+    pinmap = _load_pinning_map(Path("data/record_pinning.csv"))
     with slurm_file.open() as f:
         for line in f:
             line = line.strip()
@@ -369,10 +421,13 @@ def build_sbatch_variations(
                     f"--ntasks-per-node={ntasks_per_node}",
                     f"--cpus-per-task={cores_per_rank}",
                 ]
-                if nodelist:
-                    cmd.append(f"--nodelist={nodelist}")
-                if exclude:
-                    cmd.append(f"--exclude={exclude}")
+                # explicit args take precedence, else per-variation pinmap
+                nl = nodelist or pinmap.get(suffix, {}).get('nodelist')
+                ex = exclude or pinmap.get(suffix, {}).get('exclude')
+                if nl:
+                    cmd.append(f"--nodelist={nl}")
+                if ex:
+                    cmd.append(f"--exclude={ex}")
                 cmd.extend([
                     f"--job-name={label_base}_{suffix}",
                     str(script_path),
