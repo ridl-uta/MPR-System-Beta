@@ -405,33 +405,71 @@ def build_sbatch_variations(
     commands: List[List[str]] = []
     # Optional per-variation pinning map
     pinmap = _load_pinning_map(Path("data/record_pinning.csv"))
+
+    def _parse_script_info(path: Path) -> Tuple[Optional[str], Optional[str], str]:
+        """Return (workdir, binary_path, benchmark_name) from a run_*.slurm script.
+
+        workdir: first 'cd ' line if present
+        binary_path: first non-option token after 'srun' on the first srun line
+        benchmark_name: from filename run_<name>.slurm -> <name>
+        """
+        workdir: Optional[str] = None
+        bin_path: Optional[str] = None
+        try:
+            with path.open() as sf:
+                for ln in sf:
+                    s = ln.strip()
+                    if not workdir and s.startswith('cd '):
+                        workdir = s[3:].strip()
+                    if bin_path is None and s.startswith('srun '):
+                        tokens = s.split()
+                        for tok in tokens[1:]:
+                            if tok.startswith('-'):
+                                continue
+                            bin_path = tok
+                            break
+                        if bin_path is not None:
+                            break
+        except Exception:
+            pass
+        name = path.stem
+        if name.startswith('run_'):
+            name = name[4:]
+        return workdir, bin_path, name
     with slurm_file.open() as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
             script_path = Path(line)
-            label_base = script_path.stem
+            # Derive benchmark info from script
+            workdir, bin_path, bench_name = _parse_script_info(script_path)
+            if not bin_path:
+                bin_path = "./XSBenchMPI"
+            args_table = str(script_path.parent / f"{bench_name}.csv")
             for suffix, nodes, ntasks, ntasks_per_node in variations:
-                cmd = [
-                    "sbatch",
-                    "--exclusive",
-                    f"--nodes={nodes}",
-                    f"--ntasks={ntasks}",
-                    f"--ntasks-per-node={ntasks_per_node}",
-                    f"--cpus-per-task={cores_per_rank}",
+                # Build a python submitter invocation
+                cmd: List[str] = [
+                    "python3",
+                    "utilities/submit_benchmark.py",
+                    "-N", str(nodes),
+                    "-n", str(ntasks),
+                    "-c", str(cores_per_rank),
+                    "--table", args_table,
+                    "--bin", bin_path,
+                    "-o", f"/shared/logs/{bench_name}-%j.out",
                 ]
+                if ntasks_per_node:
+                    cmd += ["--ntasks-per-node", str(ntasks_per_node)]
                 # explicit args take precedence, else per-variation pinmap
                 nl = nodelist or pinmap.get(suffix, {}).get('nodelist')
                 ex = exclude or pinmap.get(suffix, {}).get('exclude')
                 if nl:
-                    cmd.append(f"--nodelist={nl}")
+                    cmd += ["--nodelist", nl]
                 if ex:
-                    cmd.append(f"--exclude={ex}")
-                cmd.extend([
-                    f"--job-name={label_base}_{suffix}",
-                    str(script_path),
-                ])
+                    cmd += ["--exclude", ex]
+                if workdir:
+                    cmd += ["--workdir", workdir]
                 commands.append(cmd)
 
     return commands

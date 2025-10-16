@@ -49,6 +49,7 @@ class MainController:
         record_output_csv: Optional[Path] = None,
         record_nodelist: Optional[str] = None,
         record_exclude: Optional[str] = None,
+        record_dry_run: bool = False,
     ) -> None:
         self._stop = threading.Event()
         self.power_monitor = power_monitor or PowerMonitor()
@@ -62,6 +63,7 @@ class MainController:
         self.record_output_csv = record_output_csv
         self.record_nodelist = record_nodelist
         self.record_exclude = record_exclude
+        self.record_dry_run = record_dry_run
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -135,6 +137,27 @@ class MainController:
 
             if self.collect_idle_baseline and self.idle_power_baseline is None:
                 self._collect_idle_power_baseline(self.idle_sample_seconds)
+
+            # Dry-run: preview generated submission commands and exit
+            if self.record_dry_run:
+                for cmd in commands:
+                    dry_cmd = list(cmd)
+                    if dry_cmd and dry_cmd[0] == 'python3' and len(dry_cmd) > 1 and 'utilities/submit_benchmark.py' in dry_cmd[1]:
+                        dry_cmd.append('--dry-run')
+                    elif dry_cmd and dry_cmd[0] == 'sbatch':
+                        dry_cmd.insert(1, '--test-only')
+                    logging.info("[Dry-Run] %s", " ".join(dry_cmd))
+                    try:
+                        res = subprocess.run(dry_cmd, text=True, capture_output=True, check=False)
+                        out = res.stdout.strip()
+                        err = res.stderr.strip()
+                        if out:
+                            logging.info("[Dry-Run][stdout] %s", out)
+                        if err:
+                            logging.info("[Dry-Run][stderr] %s", err)
+                    except Exception as exc:
+                        logging.warning("[Dry-Run] Failed to execute preview: %s", exc)
+                return
 
             freq_targets_mhz = [2200, 2000, 1800, 1600, 1500]
             tasks = deque(
@@ -820,6 +843,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Optional Slurm --exclude to avoid nodes during record runs",
     )
     parser.add_argument(
+        "--record-dry-run",
+        action="store_true",
+        help="Do not submit jobs; log the generated submission commands and params",
+    )
+    parser.add_argument(
         "--shed-watts",
         type=float,
         default=0.0,
@@ -951,6 +979,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         record_output_csv=args.record_output_csv,
         record_nodelist=args.record_nodelist,
         record_exclude=args.record_exclude,
+        record_dry_run=args.record_dry_run,
     )
 
     _install_signal_handlers(controller)
