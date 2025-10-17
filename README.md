@@ -58,6 +58,26 @@ nohup python3 -m main_controller \
 ```
 This collects a 45-second idle baseline, launches the sbatch variations listed in `data/slurm_scripts.txt`, applies GEOPM reductions as jobs start, and appends per-job metrics to `output/perf_results.csv`.
 
+## Record Performance (Dry-Run Preview)
+Preview the generated Slurm submissions (including resolved nodes, ranks, size and lookups) without launching any jobs:
+```
+nohup python3 -m main_controller \
+    --mode record_performance \
+    --record-dry-run \
+    --record-idle-baseline \
+    --idle-sample-seconds 45 \
+    --pdu-map data/mapping.json \
+    --pdu-user apc \
+    --pdu-password ridl123 \
+    --pdu-csv output/pdu_log.csv \
+    --events-csv output/overload_events.csv \
+    > main_controller.log 2>&1 &
+```
+Notes:
+- Writes “[Dry-Run] …” lines to `main_controller.log` with the exact `sbatch --wrap srun` commands that would be submitted.
+- Still collects the idle baseline if `--record-idle-baseline` is present; omit it to preview instantly.
+- No jobs are submitted; the controller exits after preview.
+
 ## Overload Detection Experiments
 To monitor live power and trigger DVFS reductions when thresholds are exceeded:
 ```
