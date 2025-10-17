@@ -1,3 +1,3 @@
-# Slurm scripts to be submitted by schedule_pack_jobs.py
+# Slurm scripts to be submitted by the controller
 # Add one script path per line. Lines starting with # are ignored.
-slurm_jobs/run_xsbench.slurm
+data/slurm_scripts/run_xsbenchmpi.slurm
