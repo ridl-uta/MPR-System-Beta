@@ -420,7 +420,15 @@ def build_sbatch_variations(
                 for ln in sf:
                     s = ln.strip()
                     if not workdir and s.startswith('cd '):
-                        workdir = s[3:].strip()
+                        dest = s[3:].strip()
+                        # strip common quotes
+                        if (dest.startswith('"') and dest.endswith('"')) or (dest.startswith("'") and dest.endswith("'")):
+                            dest = dest[1:-1]
+                        # ignore variable-based paths like $WORKDIR or ${WORKDIR}
+                        if '$' in dest:
+                            pass
+                        else:
+                            workdir = dest
                     if bin_path is None and s.startswith('srun '):
                         tokens = s.split()
                         for tok in tokens[1:]:
