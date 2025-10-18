@@ -74,7 +74,12 @@ def build_sbatch_wrap(
     }
     export_str = ",".join(f"{k}={v}" for k, v in env_exports.items())
 
-    cd_prefix = f"cd {shlex.quote(workdir)}; " if workdir else ""
+    # If a workdir is provided, use it; otherwise default to an env override
+    # with a sane fallback to /shared/bin so the wrap is robust when WORKDIR
+    # isn't exported by the caller.
+    cd_prefix = (
+        f"cd {shlex.quote(workdir)}; " if workdir else "cd ${WORKDIR:-/shared/bin}; "
+    )
     srun_cmd = (
         f"{cd_prefix}"
         f"srun --mpi={shlex.quote(mpi_iface)} --cpu-bind=cores "
