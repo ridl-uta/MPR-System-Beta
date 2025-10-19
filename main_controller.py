@@ -159,7 +159,7 @@ class MainController:
                         logging.warning("[Dry-Run] Failed to execute preview: %s", exc)
                 return
 
-            freq_targets_mhz = [2200, 2000, 1800, 1600, 1500]
+            freq_targets_mhz = [2200, 2000, 1800, 1600, 1400, 1200, 1000]
             tasks = deque(
                 {
                     "cmd": cmd,
