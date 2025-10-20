@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import shlex
 from typing import Dict, List, Tuple, Optional
 
 # ---------------------------------------------------------------------------
@@ -445,13 +446,27 @@ def build_sbatch_variations(
             name = name[4:]
         return workdir, bin_path, name
     with slurm_file.open() as f:
-        for line in f:
-            line = line.strip()
+        for raw in f:
+            line = raw.strip()
             if not line or line.startswith('#'):
                 continue
-            script_path = Path(line)
-            # Derive benchmark info from script
-            workdir, bin_path, bench_name = _parse_script_info(script_path)
+            # Support optional key=value pairs after the script path, e.g.:
+            #   data/slurm_scripts/run_hpccg.slurm workdir=/shared/src/HPCCG
+            tokens = shlex.split(line)
+            if not tokens:
+                continue
+            script_path = Path(tokens[0])
+            overrides: Dict[str, str] = {}
+            for tok in tokens[1:]:
+                if '=' in tok:
+                    k, v = tok.split('=', 1)
+                    overrides[k.strip().lower()] = v.strip()
+
+            # Derive benchmark info from script; allow overrides from the list
+            workdir_detected, bin_path, bench_name = _parse_script_info(script_path)
+            workdir = overrides.get('workdir', workdir_detected)
+            if 'bin' in overrides:
+                bin_path = overrides['bin']
             if not bin_path:
                 bin_path = "./XSBenchMPI"
             args_table = str(script_path.parent / f"{bench_name}.csv")
