@@ -219,6 +219,65 @@ def build_sbatch_wrap_hpccg(
     return cmd
 
 
+def build_sbatch_wrap_minife(
+    *,
+    nodes: int,
+    ranks: int,
+    cpus_per_task: int,
+    partition: str,
+    time_limit: str,
+    output: str,
+    nodelist: str | None,
+    exclude: str | None,
+    ntasks_per_node: int | None,
+    mpi_iface: str,
+    bench_bin: str,
+    workdir: str | None,
+    nx: int,
+    ny: int,
+    nz: int,
+) -> list[str]:
+    env_exports = {
+        "OMP_NUM_THREADS": str(cpus_per_task),
+        "OMP_PROC_BIND": "close",
+        "OMP_PLACES": "cores",
+    }
+    export_str = ",".join(f"{k}={v}" for k, v in env_exports.items())
+    cd_prefix = (
+        f"cd {shlex.quote(workdir)}; " if workdir else "cd ${WORKDIR:-/shared/src/miniFE/ref/src}; "
+    )
+    srun_cmd = (
+        f"{cd_prefix}"
+        f"srun --mpi={shlex.quote(mpi_iface)} --cpu-bind=cores "
+        f"--hint=nomultithread --distribution=block:block "
+        f"{shlex.quote(bench_bin)} --nx={nx} --ny={ny} --nz={nz} || true"
+    )
+
+    cmd = [
+        "sbatch",
+        "-p",
+        partition,
+        "-N",
+        str(nodes),
+        "-n",
+        str(ranks),
+        "-c",
+        str(cpus_per_task),
+        "-t",
+        time_limit,
+        "--export=ALL," + export_str,
+        "-o",
+        output,
+    ]
+    if ntasks_per_node:
+        cmd += ["--ntasks-per-node", str(ntasks_per_node)]
+    if nodelist:
+        cmd += ["--nodelist", nodelist]
+    if exclude:
+        cmd += ["--exclude", exclude]
+    cmd += ["--wrap", srun_cmd]
+    return cmd
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Submit MPI+threads benchmark using CSV args")
     ap.add_argument("-N", "--nodes", type=int, default=1, help="Slurm nodes (-N)")
@@ -247,23 +306,44 @@ def main() -> int:
         nx = nx or 180
         ny = ny or 180
         nz = nz or 180
-        cmd = build_sbatch_wrap_hpccg(
-            nodes=args.nodes,
-            ranks=args.ranks,
-            cpus_per_task=args.cpus_per_task,
-            partition=args.partition,
-            time_limit=args.time_limit,
-            output=args.output,
-            nodelist=args.nodelist,
-            exclude=args.exclude,
-            ntasks_per_node=args.ntasks_per_node,
-            mpi_iface=args.mpi_iface,
-            bench_bin=args.bench_bin,
-            workdir=args.workdir,
-            nx=nx,
-            ny=ny,
-            nz=nz,
-        )
+        # Choose command style based on binary name: miniFE needs --nx/--ny/--nz
+        bin_name = Path(args.bench_bin).name.lower()
+        if "minife" in bin_name:
+            cmd = build_sbatch_wrap_minife(
+                nodes=args.nodes,
+                ranks=args.ranks,
+                cpus_per_task=args.cpus_per_task,
+                partition=args.partition,
+                time_limit=args.time_limit,
+                output=args.output,
+                nodelist=args.nodelist,
+                exclude=args.exclude,
+                ntasks_per_node=args.ntasks_per_node,
+                mpi_iface=args.mpi_iface,
+                bench_bin=args.bench_bin,
+                workdir=args.workdir,
+                nx=nx,
+                ny=ny,
+                nz=nz,
+            )
+        else:
+            cmd = build_sbatch_wrap_hpccg(
+                nodes=args.nodes,
+                ranks=args.ranks,
+                cpus_per_task=args.cpus_per_task,
+                partition=args.partition,
+                time_limit=args.time_limit,
+                output=args.output,
+                nodelist=args.nodelist,
+                exclude=args.exclude,
+                ntasks_per_node=args.ntasks_per_node,
+                mpi_iface=args.mpi_iface,
+                bench_bin=args.bench_bin,
+                workdir=args.workdir,
+                nx=nx,
+                ny=ny,
+                nz=nz,
+            )
     else:
         size_csv, lookups_csv = read_args_row(table, args.ranks)
         size = args.size or size_csv or "small"

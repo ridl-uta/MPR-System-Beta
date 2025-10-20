@@ -7,3 +7,6 @@ data/slurm_scripts/run_xsbenchmpi.slurm workdir=/shared/bin
 
 # HPCCG (MPI)
 data/slurm_scripts/run_hpccg.slurm workdir=/shared/src/HPCCG
+
+# miniFE (MPI+OpenMP)
+data/slurm_scripts/run_minife.slurm workdir=/shared/src/miniFE/ref/src
