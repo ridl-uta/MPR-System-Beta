@@ -1,4 +1,9 @@
 # Slurm scripts to be submitted by the controller
-# Add one script path per line. Lines starting with # are ignored.
-data/slurm_scripts/run_xsbenchmpi.slurm
-data/slurm_scripts/run_hpccg.slurm
+# One entry per line; optional key=value overrides after the path.
+# Supported overrides today: workdir=</path> (and bin=</path/to/binary>)
+
+# XSBench (MPI+OpenMP)
+data/slurm_scripts/run_xsbenchmpi.slurm workdir=/shared/bin
+
+# HPCCG (MPI)
+data/slurm_scripts/run_hpccg.slurm workdir=/shared/src/HPCCG
