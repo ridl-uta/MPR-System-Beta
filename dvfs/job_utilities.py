@@ -327,11 +327,18 @@ def apply_reduction(
 
 
 def _load_pinning_map(path: Path) -> Dict[str, Dict[str, str]]:
-    """Load per-variation node pinning from CSV or whitespace text.
+    """Load per-variation pinning and CPU sizing from CSV or whitespace.
 
-    CSV headers: variant,nodelist,exclude (case-insensitive).
-    Whitespace lines: "1r1n ridlserver01" or
-    "4r2n ridlserver[01,04] exclude=ridlserver02". Lines starting with # are ignored.
+    CSV headers (case-insensitive): variant,nodelist,exclude,ranksize
+      - variant: label like 1r1n, 2r1n, 4r2n
+      - nodelist: Slurm nodelist expression
+      - exclude: nodes to exclude
+      - ranksize: cpus-per-task to use for this variant
+
+    Whitespace format examples:
+      - "1r1n ridlserver01 ranksize=10"
+      - "4r2n ridlserver[01,04] exclude=ridlserver02 ranksize=8"
+    Lines starting with # are ignored.
     """
     pin: Dict[str, Dict[str, str]] = {}
     if not path.exists():
@@ -354,6 +361,9 @@ def _load_pinning_map(path: Path) -> Dict[str, Dict[str, str]]:
                 info['nodelist'] = keys['nodelist']
             if keys.get('exclude'):
                 info['exclude'] = keys['exclude']
+            if keys.get('ranksize'):
+                # store as string; caller parses int
+                info['ranksize'] = keys['ranksize']
             if info:
                 pin[var] = info
         if pin:
@@ -369,6 +379,8 @@ def _load_pinning_map(path: Path) -> Dict[str, Dict[str, str]]:
         for token in parts[1:]:
             if token.startswith('exclude='):
                 info['exclude'] = token.split('=', 1)[1]
+            elif token.startswith('ranksize='):
+                info['ranksize'] = token.split('=', 1)[1]
             else:
                 info['nodelist'] = token
         if info:
@@ -446,7 +458,7 @@ def build_sbatch_variations(
             name = name[4:]
         return workdir, bin_path, name
     with slurm_file.open() as f:
-        for raw in f:
+    for raw in f:
             line = raw.strip()
             if not line or line.startswith('#'):
                 continue
@@ -472,12 +484,20 @@ def build_sbatch_variations(
             args_table = str(script_path.parent / f"{bench_name}.csv")
             for suffix, nodes, ntasks, ntasks_per_node in variations:
                 # Build a python submitter invocation
+                # Allow per-variant cpus-per-task override from pinmap via 'ranksize'
+                c_override = pinmap.get(suffix, {}).get('ranksize')
+                c_val = cores_per_rank
+                if c_override:
+                    try:
+                        c_val = max(1, int(str(c_override)))
+                    except ValueError:
+                        pass
                 cmd: List[str] = [
                     "python3",
                     "utilities/submit_benchmark.py",
                     "-N", str(nodes),
                     "-n", str(ntasks),
-                    "-c", str(cores_per_rank),
+                    "-c", str(c_val),
                     "--table", args_table,
                     "--bin", bin_path,
                     "-o", f"/shared/logs/{bench_name}-%j.out",

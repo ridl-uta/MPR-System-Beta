@@ -1,4 +1,4 @@
-variant,nodelist,exclude
-1r1n,ridlserver01,ridlserver02
-2r1n,ridlserver04,ridlserver02
-4r2n,"ridlserver[01,04]",ridlserver02
+variant,nodelist,exclude,ranksize
+1r1n,ridlserver01,ridlserver02,10
+2r1n,ridlserver04,ridlserver02,10
+4r2n,"ridlserver[01,04]",ridlserver02,10
