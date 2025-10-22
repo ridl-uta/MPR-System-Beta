@@ -405,19 +405,56 @@ def build_sbatch_variations(
     Returns a list of command argument lists suitable for subprocess.run.
     """
 
-    variations = [
-        ("1r1n", 1, 1, 1),  # label, nodes, ntasks, ntasks_per_node
-        ("2r1n", 1, 2, 2),
-        ("4r2n", 2, 4, 2),
-    ]
+    def _parse_variant(label: str) -> Optional[Tuple[int, int]]:
+        """Parse a label like '4r2n' -> (ranks=4, nodes=2).
+
+        Accepts multi-digit numbers (e.g., '16r4n'). Returns None if format
+        does not match.
+        """
+        import re
+        m = re.fullmatch(r"\s*(\d+)r(\d+)n\s*", label)
+        if not m:
+            return None
+        ranks = int(m.group(1))
+        nodes = int(m.group(2))
+        if ranks <= 0 or nodes <= 0:
+            return None
+        return ranks, nodes
+
+    # Optional per-variation pinning map (variants, nodelist, exclude, ranksize)
+    pinmap = _load_pinning_map(Path("data/record_pinning.csv"))
+
+    variations: List[Tuple[str, int, int, Optional[int]]] = []
+    if pinmap:
+        # Build variations from the CSV variants generically
+        for var_label in pinmap.keys():
+            parsed = _parse_variant(var_label)
+            if not parsed:
+                continue
+            ranks, nodes = parsed
+            ntasks = ranks
+            ntpn: Optional[int] = ntasks // nodes if ntasks % nodes == 0 else None
+            variations.append((var_label, nodes, ntasks, ntpn))
+        # If no valid variants parsed fall back to defaults
+        if not variations:
+            variations = [
+                ("1r1n", 1, 1, 1),
+                ("2r1n", 1, 2, 2),
+                ("4r2n", 2, 4, 2),
+            ]
+    else:
+        # Defaults when no pinning CSV is provided
+        variations = [
+            ("1r1n", 1, 1, 1),
+            ("2r1n", 1, 2, 2),
+            ("4r2n", 2, 4, 2),
+        ]
 
     slurm_file = Path(script_list_path)
     if not slurm_file.exists():
         raise FileNotFoundError(f"slurm script list not found: {slurm_file}")
 
     commands: List[List[str]] = []
-    # Optional per-variation pinning map
-    pinmap = _load_pinning_map(Path("data/record_pinning.csv"))
 
     def _parse_script_info(path: Path) -> Tuple[Optional[str], Optional[str], str]:
         """Return (workdir, binary_path, benchmark_name) from a run_*.slurm script.
@@ -485,7 +522,7 @@ def build_sbatch_variations(
             for suffix, nodes, ntasks, ntasks_per_node in variations:
                 # Build a python submitter invocation
                 # Allow per-variant cpus-per-task override from pinmap via 'ranksize'
-                c_override = pinmap.get(suffix, {}).get('ranksize')
+                c_override = pinmap.get(suffix, {}).get('ranksize') if pinmap else None
                 c_val = cores_per_rank
                 if c_override:
                     try:
@@ -505,8 +542,8 @@ def build_sbatch_variations(
                 if ntasks_per_node:
                     cmd += ["--ntasks-per-node", str(ntasks_per_node)]
                 # explicit args take precedence, else per-variation pinmap
-                nl = nodelist or pinmap.get(suffix, {}).get('nodelist')
-                ex = exclude or pinmap.get(suffix, {}).get('exclude')
+                nl = nodelist or (pinmap.get(suffix, {}).get('nodelist') if pinmap else None)
+                ex = exclude or (pinmap.get(suffix, {}).get('exclude') if pinmap else None)
                 if nl:
                     cmd += ["--nodelist", nl]
                 if ex:
