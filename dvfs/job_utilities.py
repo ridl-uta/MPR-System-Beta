@@ -458,7 +458,7 @@ def build_sbatch_variations(
             name = name[4:]
         return workdir, bin_path, name
     with slurm_file.open() as f:
-    for raw in f:
+        for raw in f:
             line = raw.strip()
             if not line or line.startswith('#'):
                 continue
