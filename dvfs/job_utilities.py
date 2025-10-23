@@ -535,6 +535,7 @@ def build_sbatch_variations(
                     "-N", str(nodes),
                     "-n", str(ntasks),
                     "-c", str(c_val),
+                    "--script", str(script_path),
                     "--table", args_table,
                     "--bin", bin_path,
                     "-o", f"/shared/logs/{bench_name}-%j.out",
