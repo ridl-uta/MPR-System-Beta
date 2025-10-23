@@ -2,3 +2,4 @@ variant,nodelist,exclude,ranksize
 1r1n,ridlserver11,ridlserver02,5
 2r1n,ridlserver11,ridlserver02,5
 4r1n,"ridlserver11",ridlserver02,5
+4r2n,"ridlserver[11,12]",ridlserver02,5
