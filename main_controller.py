@@ -159,7 +159,20 @@ class MainController:
                         logging.warning("[Dry-Run] Failed to execute preview: %s", exc)
                 return
 
-            freq_targets_mhz = [2200, 2000, 1800, 1600, 1400, 1200, 1000]
+            interval_mhz = 200
+            max_freq_mhz = int(round(self.dvfs_manager.max_freq_mhz))
+            min_freq_mhz = int(round(self.dvfs_manager.min_freq_mhz))
+            if max_freq_mhz <= 0 or min_freq_mhz <= 0 or max_freq_mhz < min_freq_mhz:
+                logging.error("[Record] Invalid DVFS bounds max=%s min=%s", max_freq_mhz, min_freq_mhz)
+                return
+
+            freq_targets_mhz: List[int] = []
+            current_freq = max_freq_mhz
+            while current_freq >= min_freq_mhz:
+                freq_targets_mhz.append(current_freq)
+                current_freq -= interval_mhz
+            if freq_targets_mhz[-1] != min_freq_mhz:
+                freq_targets_mhz.append(min_freq_mhz)
             tasks = deque(
                 {
                     "cmd": cmd,
