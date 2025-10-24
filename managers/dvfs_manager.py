@@ -16,7 +16,7 @@ from dvfs import (
 )
 
 _DEFAULT_MAX_FREQ_MHZ = 2400.0
-_DEFAULT_MIN_FREQ_MHZ = 1600.0
+_DEFAULT_MIN_FREQ_MHZ = 1000.0
 
 
 class DVFSManager:
