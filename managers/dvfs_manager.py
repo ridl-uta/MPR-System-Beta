@@ -15,7 +15,7 @@ from dvfs import (
     compute_frequency_from_reduction,
 )
 
-_DEFAULT_MAX_FREQ_MHZ = 2200.0
+_DEFAULT_MAX_FREQ_MHZ = 2400.0
 _DEFAULT_MIN_FREQ_MHZ = 1600.0
 
 
