@@ -23,6 +23,5 @@ NZ=${NZ:-240}
 
 cd "$WORKDIR"
 
-# Launch miniFE with explicit grid flags.
-srun --mpi=pmi2 --cpu-bind=cores ./miniFE.x --nx=$NX --ny=$NY --nz=$NZ
-
+# Launch miniFE with explicit grid flags. Allow MPI_IFACE override.
+srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores ./miniFE.x --nx=$NX --ny=$NY --nz=$NZ

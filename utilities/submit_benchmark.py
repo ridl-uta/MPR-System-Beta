@@ -358,6 +358,8 @@ def main() -> int:
         nz = nz or 180
         if args.script:
             env_vars: dict[str, str] = {"NX": str(nx), "NY": str(ny), "NZ": str(nz)}
+            if args.mpi_iface:
+                env_vars["MPI_IFACE"] = args.mpi_iface
             if args.workdir:
                 env_vars["WORKDIR"] = args.workdir
             cmd = build_sbatch_script(
@@ -400,6 +402,8 @@ def main() -> int:
                 "SIZE": size,
                 "LOOKUPS": str(lookups),
             }
+            if args.mpi_iface:
+                env_vars["MPI_IFACE"] = args.mpi_iface
             if args.workdir:
                 env_vars["WORKDIR"] = args.workdir
             cmd = build_sbatch_script(

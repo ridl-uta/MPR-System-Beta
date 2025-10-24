@@ -19,5 +19,5 @@ NZ=${NZ:-$SIZE}
 
 cd "$WORKDIR"
 
-# Launch HPCCG with the configured grid dimensions.
-srun --mpi=pmi2 --cpu-bind=cores ./test_HPCCG_mpi "$NX" "$NY" "$NZ"
+# Launch HPCCG with the configured grid dimensions. Allow MPI_IFACE override.
+srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores ./test_HPCCG_mpi "$NX" "$NY" "$NZ"

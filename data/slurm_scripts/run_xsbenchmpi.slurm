@@ -20,5 +20,5 @@ LOOKUPS=${LOOKUPS:-10000}
 cd "$WORKDIR"
 
 # Multi-rank + OpenMP; keep step success even if XSBench returns non-zero for checksum
-srun --mpi=pmi2 --cpu-bind=cores ./XSBenchMPI -s "$SIZE" -l "$LOOKUPS" -t "$OMP_NUM_THREADS" || true
-
+# Allow overriding MPI interface via MPI_IFACE (pmi2|pmix). Default to pmi2 for MPICH builds.
+srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores ./XSBenchMPI -s "$SIZE" -l "$LOOKUPS" -t "$OMP_NUM_THREADS" || true
