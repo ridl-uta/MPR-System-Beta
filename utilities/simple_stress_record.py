@@ -65,14 +65,21 @@ def wait_job(job_id: str, poll_s: float = 3.0) -> Tuple[Optional[str], Optional[
     last_state = None
     # Wait until job leaves the queue
     while True:
-        state = poll_job_state(job_id) or last_state
-        last_state = state
-        if state is None or state in terminal:
+        state = poll_job_state(job_id)
+        if state is None:
+            # No longer in the queue; if we never saw a state or last_state was terminal, break
+            if last_state is None or last_state in terminal:
+                break
+            state = last_state
+        else:
+            last_state = state
+        if state in terminal:
             break
         time.sleep(poll_s)
     # Query sacct for start/end
     proc = run(["sacct", "-j", job_id, "-X", "--parsable2", "-o", "JobID,State,Start,End,NodeList%"], check=False)
-    start_iso = end_iso = final_state = None
+    final_state = last_state
+    start_iso = end_iso = None
     if proc.returncode == 0:
         lines = [ln for ln in proc.stdout.splitlines() if ln]
         if len(lines) >= 2:
