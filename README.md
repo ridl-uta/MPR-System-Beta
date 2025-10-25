@@ -138,5 +138,6 @@ nohup python3 utilities/simple_stress_record.py \
 ```
 Notes:
 - Uses `data/slurm_scripts/run_stressng.slurm` (matrix + cpu stressors) and binds cores.
+- Provide --pdu-map / --pdu-user / --pdu-password to log power to --pdu-csv; otherwise avg_power_w/net_avg_power_w stay blank.
 - Records an idle baseline for `--idle-seconds` (default 45) before the sweep.
 - Generates target frequencies from max→min by `--interval` MHz; appends one row per step to `--output-csv`.
