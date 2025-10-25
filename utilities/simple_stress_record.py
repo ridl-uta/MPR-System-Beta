@@ -179,6 +179,10 @@ def main() -> int:
     ap.add_argument("--output-csv", type=Path, default=Path("output/stress_results.csv"))
     args = ap.parse_args()
 
+    print("[INFO] Starting stress sweep: max={} MHz, min={} MHz, interval={} MHz".format(
+        args.max_freq, args.min_freq, args.interval
+    ))
+
     args.pdu_csv.parent.mkdir(parents=True, exist_ok=True)
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
 
