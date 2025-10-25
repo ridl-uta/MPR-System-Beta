@@ -220,6 +220,7 @@ def main() -> int:
     for freq_mhz in targets:
         reduction = max(0.0, min(1.0, 1.0 - (freq_mhz / args.max_freq)))
         # Submit stress-ng job
+        print(f"[INFO] Target {freq_mhz} MHz -> reduction {reduction:.3f}", flush=True)
         sbatch_cmd = [
             "sbatch",
             "-p", args.partition,
@@ -243,6 +244,7 @@ def main() -> int:
         if not job_id:
             print(f"[ERR] could not parse job id from: {sb.stdout}", file=sys.stderr)
             return 3
+        print(f"[INFO] Submitted job {job_id} for {freq_mhz} MHz", flush=True)
         # Apply DVFS to job cores
         try:
             dvfs.submit_reduction(job_id, reduction)
@@ -251,6 +253,7 @@ def main() -> int:
 
         # Wait for completion and get times
         state, start_iso, end_iso = wait_job(job_id)
+        print(f"[INFO] Job {job_id} finished with state {state or 'UNKNOWN'}", flush=True)
         start_dt = iso_to_dt(start_iso) or datetime.now(timezone.utc)
         end_dt = iso_to_dt(end_iso) or datetime.now(timezone.utc)
         duration_s = (end_dt - start_dt).total_seconds()
@@ -268,6 +271,7 @@ def main() -> int:
             "nodes": "1",
         }
         append_result(args.output_csv, row)
+        print(f"[INFO] Appended results for job {job_id} to {args.output_csv}", flush=True)
 
     if pm:
         pm.stop()
