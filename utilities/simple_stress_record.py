@@ -58,6 +58,22 @@ def poll_job_state(job_id: str, interval_s: float = 2.0) -> Optional[str]:
     return state or None
 
 
+def wait_for_state(job_id: str, desired: Tuple[str, ...], timeout_s: float = 120.0, poll_s: float = 2.0) -> Optional[str]:
+    """Poll squeue until job enters a desired state or timeout."""
+    deadline = time.time() + timeout_s
+    last_state: Optional[str] = None
+    while time.time() < deadline:
+        state = poll_job_state(job_id)
+        if state:
+            last_state = state
+            if state in desired:
+                return state
+        elif last_state and last_state in desired:
+            return last_state
+        time.sleep(poll_s)
+    return last_state
+
+
 def wait_job(job_id: str, poll_s: float = 3.0) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     # Return (state, start_iso, end_iso)
     # Poll until sacct reports terminal state
@@ -247,11 +263,15 @@ def main() -> int:
             print(f"[ERR] could not parse job id from: {sb.stdout}", file=sys.stderr)
             return 3
         print(f"[INFO] Submitted job {job_id} for {freq_mhz} MHz", flush=True)
-        # Apply DVFS to job cores
-        try:
-            dvfs.submit_reduction(job_id, reduction)
-        except Exception as exc:
-            print(f"[WARN] DVFS apply failed for job {job_id}: {exc}")
+        # Wait for RUNNING state before applying DVFS
+        state_before = wait_for_state(job_id, ("RUNNING", "COMPLETED"), timeout_s=120)
+        if state_before == "RUNNING":
+            try:
+                dvfs.submit_reduction(job_id, reduction)
+            except Exception as exc:
+                print(f"[WARN] DVFS apply failed for job {job_id}: {exc}")
+        else:
+            print(f"[WARN] Skipping DVFS apply for job {job_id}; state={state_before}")
 
         # Wait for completion and get times
         state, start_iso, end_iso = wait_job(job_id)
