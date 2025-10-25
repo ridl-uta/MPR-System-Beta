@@ -181,7 +181,7 @@ def main() -> int:
 
     print("[INFO] Starting stress sweep: max={} MHz, min={} MHz, interval={} MHz".format(
         args.max_freq, args.min_freq, args.interval
-    ))
+    ), flush=True)
 
     args.pdu_csv.parent.mkdir(parents=True, exist_ok=True)
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
