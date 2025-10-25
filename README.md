@@ -96,3 +96,26 @@ nohup python3 -m main_controller \
     > main_controller.log 2>&1 &
 ```
 With these flags the controller streams PDU data, raises events when sustained load crosses 850 W, and calls the market + DVFS managers to reduce job frequencies until the overload is handled.
+
+## Quick Stress Test (Single Node)
+- Purpose: sweep CPU frequency on one node and observe power/runtime response.
+- Requirements: `stress-ng` on compute nodes; optional PDU config for power logging.
+
+Example:
+```
+nohup python3 utilities/simple_stress_record.py \
+  --max-freq 2400 --min-freq 1000 --interval 200 \
+  --duration 180 --threads 10 \
+  --pdu-map data/mapping.json \
+  --pdu-user apc --pdu-password ridl123 \
+  --pdu-csv output/pdu_log_simple.csv \
+  --output-csv output/stress_results.csv \
+  > stress_record.log 2>&1 &
+```
+Tail `stress_record.log` for progress; results accumulate in `output/stress_results.csv`.
+```
+```
+Notes:
+- Uses `data/slurm_scripts/run_stressng.slurm` (matrix + cpu stressors) and binds cores.
+- Records an idle baseline for `--idle-seconds` (default 45) before the sweep.
+- Generates target frequencies from max→min by `--interval` MHz; appends one row per step to `--output-csv`.
