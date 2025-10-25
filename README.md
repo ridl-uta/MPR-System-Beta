@@ -106,11 +106,11 @@ Example:
 nohup python3 utilities/simple_stress_record.py \
   --max-freq 2400 --min-freq 1000 --interval 200 \
   --duration 180 --threads 10 \
+  --nodelist ridlserver11 --exclude ridlserver12 \
   --pdu-map data/mapping.json \
   --pdu-user apc --pdu-password ridl123 \
   --pdu-csv output/pdu_log_simple.csv \
   --output-csv output/stress_results.csv \
-  --nodelist ridlserver11 \
   > stress_record.log 2>&1 &
 ```
 Tail `stress_record.log` for progress; results accumulate in `output/stress_results.csv`.
