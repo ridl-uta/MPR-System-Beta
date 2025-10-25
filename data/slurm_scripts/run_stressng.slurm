@@ -3,6 +3,8 @@
 #SBATCH -p debug
 #SBATCH -t 00:15:00
 #SBATCH --mem-per-cpu=512M
+#SBATCH --nodelist=${TARGET_NODE:-}
+#SBATCH --exclude=${EXCLUDE_NODE:-}
 #SBATCH -o /shared/logs/stressng-%j.out
 
 # Simple single-node CPU + FPU stress that responds to frequency changes.
@@ -41,4 +43,6 @@ srun --cpu-bind=cores \
             --cpu 0 \
             --timeout "${DURATION}s" \
             --metrics-brief || true
-
+# nodelist/exclude can be supplied via Slurm directives or overrides, e.g.:
+#   --export=ALL,TARGET_NODE=ridlserver11
+# or from sbatch flags (--nodelist/--exclude)
