@@ -62,17 +62,12 @@ def wait_job(job_id: str, poll_s: float = 3.0) -> Tuple[Optional[str], Optional[
     # Return (state, start_iso, end_iso)
     # Poll until sacct reports terminal state
     terminal = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"}
-    last_state = None
-    # Wait until job leaves the queue
+    last_state: Optional[str] = None
     while True:
         state = poll_job_state(job_id)
         if state is None:
-            # No longer in the queue; if we never saw a state or last_state was terminal, break
-            if last_state is None or last_state in terminal:
-                break
-            state = last_state
-        else:
-            last_state = state
+            break
+        last_state = state
         if state in terminal:
             break
         time.sleep(poll_s)
