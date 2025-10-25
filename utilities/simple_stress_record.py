@@ -169,6 +169,8 @@ def main() -> int:
     ap.add_argument("--threads", type=int, default=10, help="OMP threads / cpus-per-task")
     ap.add_argument("--partition", default="debug")
     ap.add_argument("--workdir", default="/shared")
+    ap.add_argument("--nodelist", default=None, help="Nodes to target (passed to sbatch --nodelist)")
+    ap.add_argument("--exclude", default=None, help="Nodes to exclude (sbatch --exclude)")
     ap.add_argument("--pdu-map", type=Path)
     ap.add_argument("--pdu-user")
     ap.add_argument("--pdu-password")
@@ -223,8 +225,12 @@ def main() -> int:
             "-t", "00:10:00",
             "--export=ALL,WORKDIR=" + args.workdir + f",DURATION={args.duration}",
             "-o", "/shared/logs/stressng-%j.out",
-            str(Path("data/slurm_scripts/run_stressng.slurm")),
         ]
+        if args.nodelist:
+            sbatch_cmd += ["--nodelist", args.nodelist]
+        if args.exclude:
+            sbatch_cmd += ["--exclude", args.exclude]
+        sbatch_cmd.append(str(Path("data/slurm_scripts/run_stressng.slurm")))
         sb = run(sbatch_cmd)
         if sb.returncode != 0:
             print(f"[ERR] sbatch failed: {sb.stdout} {sb.stderr}", file=sys.stderr)
