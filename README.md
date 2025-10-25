@@ -114,7 +114,7 @@ nohup python3 utilities/simple_stress_record.py \
   > stress_record.log 2>&1 &
 ```
 Tail `stress_record.log` for progress; results accumulate in `output/stress_results.csv`.
-Use `--nodelist` / `--exclude` (supports Slurm syntax like `nodeA,nodeB` or `node[01-04]`) or export `TARGET_NODE` / `EXCLUDE_NODE` to steer node placement.
+Use `--nodelist` / `--exclude` (supports Slurm syntax like `nodeA,nodeB` or `node[01-04]`) or export `TARGET_NODE` / `EXCLUDE_NODE` to steer node placement. Update to the latest repo revision to ensure these CLI options are available.
 
 Example to target a specific node and exclude another:
 ```
