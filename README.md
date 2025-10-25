@@ -125,6 +125,15 @@ nohup python3 utilities/simple_stress_record.py \
   --output-csv output/stress_results_ridlserver11.csv \
   > stress_record_ridlserver11.log 2>&1 &
 ```
+To target a group while excluding one of them:
+```
+nohup python3 utilities/simple_stress_record.py \
+  --max-freq 2400 --min-freq 1000 --interval 200 \
+  --duration 180 --threads 10 \
+  --nodelist ridlserver[11-14] --exclude ridlserver13 \
+  --output-csv output/stress_results_ridlserver11_14.csv \
+  > stress_record_ridlserver11_14.log 2>&1 &
+```
 ```
 ```
 Notes:
