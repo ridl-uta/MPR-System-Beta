@@ -214,6 +214,7 @@ def append_result(csv_path: Path, row: dict) -> None:
         "duration_s",
         "avg_power_w",
         "net_avg_power_w",
+        "idle_power_w",
         "nodes",
     ]
     need_header = not csv_path.exists() or csv_path.stat().st_size == 0
@@ -372,6 +373,7 @@ def main() -> int:
             "duration_s": f"{duration_s:.1f}",
             "avg_power_w": f"{total_power:.3f}" if total_power is not None else "",
             "net_avg_power_w": f"{net_power:.3f}" if net_power is not None else "",
+            "idle_power_w": f"{idle_total_avg:.3f}" if idle_total_avg is not None else "",
             "nodes": nodes_label,
         }
         append_result(args.output_csv, row)
