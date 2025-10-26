@@ -123,6 +123,7 @@ column -t -s, output/stress_results.csv | sed '1,5p'
 
 Example to target a specific node and exclude another:
 ```
+# Launch the sweep and capture power metrics for ridlserver11
 nohup python3 utilities/simple_stress_record.py \
   --max-freq 2400 --min-freq 1000 --interval 200 \
   --duration 180 --threads 10 \
@@ -132,6 +133,9 @@ nohup python3 utilities/simple_stress_record.py \
   --pdu-csv output/pdu_log_simple.csv \
   --output-csv output/stress_results_ridlserver11.csv \
   > stress_record_ridlserver11.log 2>&1 &
+
+# Preview the first few result rows (shows avg/net/idle power)
+column -t -s, output/stress_results_ridlserver11.csv | sed '1,10p'
 ```
 To target a group while excluding one of them:
 ```
