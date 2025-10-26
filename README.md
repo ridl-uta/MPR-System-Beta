@@ -116,6 +116,11 @@ nohup python3 utilities/simple_stress_record.py \
 Tail `stress_record.log` for progress; results accumulate in `output/stress_results.csv`.
 Use `--nodelist` / `--exclude` (supports Slurm syntax like `nodeA,nodeB` or `node[01-04]`) or export `TARGET_NODE` / `EXCLUDE_NODE` to steer node placement. Update to the latest repo revision to ensure these CLI options are available.
 
+Quick way to inspect the collected metrics (including `avg_power_w`, `net_avg_power_w`, and `idle_power_w`):
+```
+column -t -s, output/stress_results.csv | sed '1,5p'
+```
+
 Example to target a specific node and exclude another:
 ```
 nohup python3 utilities/simple_stress_record.py \
