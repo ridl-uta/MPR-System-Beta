@@ -27,6 +27,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple, Iterable
+import json
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -62,6 +63,25 @@ def expand_nodelist(nodelist: str) -> list[str]:
         pass
     # Fallback: split on commas
     return [part.strip() for part in nodelist.split(",") if part.strip()]
+
+
+def build_node_outlet_map(mapping_path: Path) -> dict[str, list[tuple[str, str]]]:
+    if not mapping_path or not mapping_path.exists():
+        return {}
+    try:
+        cfg = json.loads(mapping_path.read_text())
+    except json.JSONDecodeError:
+        return {}
+    node_map: dict[str, list[tuple[str, str]]] = {}
+    for pdu in cfg.get("pdus", []):
+        host = str(pdu.get("host", "")).strip()
+        if not host:
+            continue
+        for outlet, node in pdu.get("map", {}).items():
+            if not node:
+                continue
+            node_map.setdefault(node.strip(), []).append((host, str(outlet)))
+    return node_map
 
 
 def poll_job_state(job_id: str, interval_s: float = 2.0) -> Optional[str]:
