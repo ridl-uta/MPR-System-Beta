@@ -26,7 +26,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -48,6 +48,20 @@ def parse_job_id(sbatch_stdout: str) -> Optional[str]:
     if sbatch_stdout.strip().isdigit():
         return sbatch_stdout.strip()
     return None
+
+
+def expand_nodelist(nodelist: str) -> list[str]:
+    nodelist = nodelist.strip()
+    if not nodelist:
+        return []
+    try:
+        result = run(["scontrol", "show", "hostnames", nodelist], check=False)
+        if result.returncode == 0 and result.stdout:
+            return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except FileNotFoundError:
+        pass
+    # Fallback: split on commas
+    return [part.strip() for part in nodelist.split(",") if part.strip()]
 
 
 def poll_job_state(job_id: str, interval_s: float = 2.0) -> Optional[str]:
@@ -121,21 +135,35 @@ def iso_to_dt(text: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def compute_avg_power(pdu_csv: Path, start: datetime, end: datetime) -> Optional[float]:
+def compute_power_stats(
+    pdu_csv: Path,
+    start: datetime,
+    end: datetime,
+    *,
+    nodes_filter: Optional[Iterable[str]] = None,
+) -> Tuple[Optional[float], dict[str, float]]:
     if not pdu_csv.exists():
-        return None
+        return None, {}
+    nodes_filter_set = {n.strip() for n in nodes_filter} if nodes_filter else None
     try:
         with pdu_csv.open() as f:
             reader = csv.reader(f)
             header = next(reader, None)
             if not header:
-                return None
+                return None, {}
             try:
                 total_idx = header.index("total_watts")
             except ValueError:
                 total_idx = len(header) - 1
-            cnt = 0
-            s = 0.0
+            node_names = header[1:total_idx]
+            if nodes_filter_set is not None:
+                node_names = [n for n in node_names if n in nodes_filter_set]
+            sums = {n: 0.0 for n in node_names}
+            counts = {n: 0 for n in node_names}
+            total_sum = 0.0
+            total_count = 0
+            selected_sum = 0.0
+            selected_samples = 0
             for row in reader:
                 if len(row) <= total_idx:
                     continue
@@ -144,17 +172,35 @@ def compute_avg_power(pdu_csv: Path, start: datetime, end: datetime) -> Optional
                 except ValueError:
                     continue
                 ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-                if start <= ts <= end:
+                if not (start <= ts <= end):
+                    continue
+                try:
+                    total_sum += float(row[total_idx])
+                    total_count += 1
+                except ValueError:
+                    pass
+                row_sum = 0.0
+                row_has_nodes = False
+                for node in node_names:
                     try:
-                        s += float(row[total_idx])
-                        cnt += 1
-                    except ValueError:
+                        idx = header.index(node)
+                        val = float(row[idx])
+                    except (ValueError, IndexError):
                         continue
-            if cnt == 0:
-                return None
-            return s / cnt
+                    sums[node] += val
+                    counts[node] += 1
+                    row_sum += val
+                    row_has_nodes = True
+                if row_has_nodes:
+                    selected_sum += row_sum
+                    selected_samples += 1
+            total_avg = (total_sum / total_count) if total_count else None
+            if nodes_filter_set and selected_samples > 0:
+                total_avg = selected_sum / selected_samples
+            node_avgs = {n: sums[n] / counts[n] for n in node_names if counts[n]}
+            return total_avg, node_avgs
     except Exception:
-        return None
+        return None, {}
 
 
 def append_result(csv_path: Path, row: dict) -> None:
@@ -204,8 +250,16 @@ def main() -> int:
     args.pdu_csv.parent.mkdir(parents=True, exist_ok=True)
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
 
+    expanded_nodes: Optional[list[str]] = None
+    if args.nodelist:
+        expanded_nodes = expand_nodelist(args.nodelist)
+        if not expanded_nodes:
+            expanded_nodes = [n.strip() for n in args.nodelist.split(",") if n.strip()]
+
     # Optional power monitor
     pm: Optional[PowerMonitor] = None
+    idle_total_avg: Optional[float] = None
+    idle_node_avgs: dict[str, float] = {}
     if args.pdu_map and args.pdu_user and args.pdu_password:
         pm = PowerMonitor(
             map_path=str(args.pdu_map),
@@ -217,7 +271,19 @@ def main() -> int:
         )
         pm.start()
         # Idle baseline
+        idle_start = datetime.now(timezone.utc)
         time.sleep(max(1, args.idle_seconds))
+        idle_end = datetime.now(timezone.utc)
+        idle_total_avg, idle_node_avgs = compute_power_stats(
+            args.pdu_csv,
+            idle_start,
+            idle_end,
+            nodes_filter=expanded_nodes,
+        )
+        if idle_total_avg is not None:
+            print(f"[INFO] Idle baseline total={idle_total_avg:.3f}W", flush=True)
+        if idle_node_avgs:
+            print(f"[INFO] Idle per-node={idle_node_avgs}", flush=True)
 
     # Build target list
     max_mhz = int(round(args.max_freq))
@@ -280,7 +346,23 @@ def main() -> int:
         end_dt = iso_to_dt(end_iso) or datetime.now(timezone.utc)
         duration_s = (end_dt - start_dt).total_seconds()
 
-        avg_power = compute_avg_power(args.pdu_csv, start_dt, end_dt) if pm else None
+        total_power = None
+        net_power = None
+        if pm:
+            total_power, node_avgs = compute_power_stats(
+                args.pdu_csv,
+                start_dt,
+                end_dt,
+                nodes_filter=expanded_nodes,
+            )
+            if total_power is not None and idle_total_avg is not None:
+                net_power = total_power - idle_total_avg
+            if total_power is not None:
+                msg = f"[INFO] Power avg={total_power:.3f}W"
+                if net_power is not None:
+                    msg += f" net={net_power:.3f}W"
+                print(msg, flush=True)
+        nodes_label = ",".join(expanded_nodes) if expanded_nodes else "1"
         row = {
             "job_id": job_id,
             "freq_mhz": freq_mhz,
@@ -288,9 +370,9 @@ def main() -> int:
             "start": start_dt.isoformat(),
             "end": end_dt.isoformat(),
             "duration_s": f"{duration_s:.1f}",
-            "avg_power_w": f"{avg_power:.3f}" if avg_power is not None else "",
-            "net_avg_power_w": "",
-            "nodes": "1",
+            "avg_power_w": f"{total_power:.3f}" if total_power is not None else "",
+            "net_avg_power_w": f"{net_power:.3f}" if net_power is not None else "",
+            "nodes": nodes_label,
         }
         append_result(args.output_csv, row)
         print(f"[INFO] Appended results for job {job_id} to {args.output_csv}", flush=True)
