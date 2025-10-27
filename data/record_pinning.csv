@@ -1,5 +1,7 @@
 variant,nodelist,exclude,ranksize
-1r1n,ridlserver11,ridlserver02,10
-2r1n,ridlserver11,ridlserver02,10
-4r1n,"ridlserver11",ridlserver02,10
-4r2n,"ridlserver[11,12]",ridlserver02,10
+# 4 ranks across 2 nodes (2 per node x 10 threads = 20 cores/node)
+4r2n,"ridlserver[04,11]",ridlserver02,10
+# 6 ranks across 3 nodes (2 per node x 10 threads = 20 cores/node)
+6r3n,"ridlserver[04,05,11]",ridlserver02,10
+# 8 ranks across 4 nodes (2 per node x 10 threads = 20 cores/node)
+8r4n,"ridlserver[04,05,11,12]",ridlserver02,10
