@@ -8,6 +8,15 @@
 # Allow caller to pass working directory (default /shared/bin)
 WORKDIR=${WORKDIR:-/shared/bin}
 
+# Use the PMI2-enabled Open MPI stack and pin traffic to eno1.
+export PATH=/shared/ompi-pmi2/bin:$PATH
+export LD_LIBRARY_PATH=/shared/ompi-pmi2/lib:$LD_LIBRARY_PATH
+export OMPI_MCA_ess=pmi
+export OMPI_MCA_plm=none
+export OMPI_MCA_pml=ob1
+export OMPI_MCA_btl=tcp,self
+export OMPI_MCA_btl_tcp_if_include=eno1
+
 # OpenMP settings derived from Slurm cpus-per-task
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 export OMP_PROC_BIND=close
