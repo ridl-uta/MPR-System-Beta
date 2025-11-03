@@ -166,19 +166,43 @@ build_remote_cmd() {
     conf_q=$(printf '%q' "$conf")
   fi
 
+  local action_cmd=""
   if (( direct == 1 )); then
     if (( allow_sudo == 1 )); then
-      echo "sudo -n /usr/local/sbin/geopm_apply.sh ${conf_q} || /usr/local/sbin/geopm_apply.sh ${conf_q}"
+      action_cmd="sudo -n /usr/local/sbin/geopm_apply.sh ${conf_q} || /usr/local/sbin/geopm_apply.sh ${conf_q}"
     else
-      echo "/usr/local/sbin/geopm_apply.sh ${conf_q}"
+      action_cmd="/usr/local/sbin/geopm_apply.sh ${conf_q}"
     fi
   else
     if (( allow_sudo == 1 )); then
-      echo "sudo -n systemctl start geopm-apply.service >/dev/null 2>&1 || systemctl start geopm-apply.service >/dev/null 2>&1 || sudo -n /usr/local/sbin/geopm_apply.sh ${conf_q} || /usr/local/sbin/geopm_apply.sh ${conf_q}"
+      action_cmd="sudo -n systemctl start geopm-apply.service >/dev/null 2>&1 || systemctl start geopm-apply.service >/dev/null 2>&1 || sudo -n /usr/local/sbin/geopm_apply.sh ${conf_q} || /usr/local/sbin/geopm_apply.sh ${conf_q}"
     else
-      echo "systemctl start geopm-apply.service >/dev/null 2>&1 || /usr/local/sbin/geopm_apply.sh ${conf_q}"
+      action_cmd="systemctl start geopm-apply.service >/dev/null 2>&1 || /usr/local/sbin/geopm_apply.sh ${conf_q}"
     fi
   fi
+  action_cmd="${action_cmd};"
+
+  printf '%s\n' '{'
+  printf '  if { %s }; then\n' "$action_cmd"
+  printf '    status=0\n'
+  printf '  else\n'
+  printf '    status=$?\n'
+  printf '  fi\n'
+  printf '  if [ $status -eq 0 ]; then\n'
+  cat <<'EOF'
+    echo "=== $(date '+%H:%M:%S') ==="
+    for c in /sys/devices/system/cpu/cpu[0-9]*; do
+      max_file="$c/cpufreq/scaling_max_freq"
+      if [ -f "$max_file" ]; then
+        cpu=$(basename "$c")
+        max_mhz=$(( $(cat "$max_file") / 1000 ))
+        printf "%s: %4d MHz\n" "$cpu" "$max_mhz"
+      fi
+    done | sort -V
+EOF
+  printf '  fi\n'
+  printf '  exit $status\n'
+  printf '}\n'
 }
 
 REMOTE_CMD_TEMPLATE=$(build_remote_cmd "$FORCE_DIRECT" "$CONF_PATH" "$ALLOW_SUDO")
