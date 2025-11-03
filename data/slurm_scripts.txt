@@ -10,3 +10,6 @@ data/slurm_scripts/run_hpccg.slurm workdir=/shared/src/HPCCG
 
 # miniFE (MPI+OpenMP)
 data/slurm_scripts/run_minife.slurm workdir=/shared/src/miniFE/ref/src
+
+# HPCG (MPI+OpenMP hybrid)
+data/slurm_scripts/run_hpcg.slurm workdir=/shared/src/hpcg/hpcg-3.1/build_mpi_omp/bin
