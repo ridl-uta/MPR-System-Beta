@@ -134,10 +134,12 @@ def _read_host(
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Apply one target frequency to all nodes in a nodelist, then read back.",
+        description="Apply a max->min frequency sweep to all nodes in a nodelist and read back.",
     )
     p.add_argument("--nodelist", required=True, help="Slurm nodelist expression or comma list")
-    p.add_argument("--freq-mhz", type=float, required=True, help="Target frequency in MHz")
+    p.add_argument("--max-freq-mhz", type=float, required=True, help="Starting frequency in MHz")
+    p.add_argument("--min-freq-mhz", type=float, required=True, help="Ending frequency in MHz")
+    p.add_argument("--interval-mhz", type=int, default=200, help="Step size in MHz (default: 200)")
     p.add_argument("--sleep-seconds", type=float, default=2.0, help="Sleep before readback")
     p.add_argument(
         "--control-kind",
@@ -155,8 +157,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    if args.freq_mhz <= 0:
-        print("[ERR] --freq-mhz must be positive", file=sys.stderr)
+    if args.max_freq_mhz <= 0 or args.min_freq_mhz <= 0:
+        print("[ERR] --max-freq-mhz and --min-freq-mhz must be positive", file=sys.stderr)
+        return 2
+    if args.min_freq_mhz > args.max_freq_mhz:
+        print("[ERR] --min-freq-mhz cannot be greater than --max-freq-mhz", file=sys.stderr)
+        return 2
+    if args.interval_mhz <= 0:
+        print("[ERR] --interval-mhz must be positive", file=sys.stderr)
         return 2
 
     try:
@@ -166,41 +174,54 @@ def main(argv: list[str] | None = None) -> int:
         return 3
     print(f"[INFO] hosts: {', '.join(hosts)}")
 
-    freq_hz = int(round(args.freq_mhz * 1e6))
-    try:
-        _write_host_configs(
-            hosts,
-            conf_dir=args.conf_dir,
-            freq_hz=freq_hz,
-            control_kind=args.control_kind,
-        )
-        _apply_configs(hosts, ssh_user=args.ssh_user, dry_run=args.dry_run)
-    except Exception as exc:
-        print(f"[ERR] apply failed: {exc}", file=sys.stderr)
-        return 4
-
-    if args.dry_run:
-        return 0
-
-    if args.sleep_seconds > 0:
-        time.sleep(args.sleep_seconds)
+    max_mhz = int(round(args.max_freq_mhz))
+    min_mhz = int(round(args.min_freq_mhz))
+    targets: list[int] = []
+    current = max_mhz
+    while current >= min_mhz:
+        targets.append(current)
+        current -= args.interval_mhz
+    if not targets or targets[-1] != min_mhz:
+        targets.append(min_mhz)
 
     rc = 0
-    for host in hosts:
-        print(f"\n[{host}] readback {args.read_signal}/{args.read_domain}")
-        result = _read_host(
-            host,
-            signal=args.read_signal,
-            domain=args.read_domain,
-            ssh_user=args.ssh_user,
-        )
-        if result.stdout:
-            print(result.stdout.rstrip())
-        if result.returncode != 0:
-            rc = result.returncode
-            print(f"[WARN] readback failed on {host}: exit={result.returncode}", file=sys.stderr)
-            if result.stderr:
-                print(result.stderr.rstrip(), file=sys.stderr)
+    for target_mhz in targets:
+        freq_hz = int(round(target_mhz * 1e6))
+        print(f"\n[STEP] applying {target_mhz} MHz across {len(hosts)} host(s)")
+        try:
+            _write_host_configs(
+                hosts,
+                conf_dir=args.conf_dir,
+                freq_hz=freq_hz,
+                control_kind=args.control_kind,
+            )
+            _apply_configs(hosts, ssh_user=args.ssh_user, dry_run=args.dry_run)
+        except Exception as exc:
+            print(f"[ERR] apply failed at {target_mhz} MHz: {exc}", file=sys.stderr)
+            return 4
+
+        if args.dry_run:
+            continue
+
+        if args.sleep_seconds > 0:
+            time.sleep(args.sleep_seconds)
+
+        for host in hosts:
+            print(f"\n[{host}] readback {args.read_signal}/{args.read_domain} @ {target_mhz} MHz")
+            result = _read_host(
+                host,
+                signal=args.read_signal,
+                domain=args.read_domain,
+                ssh_user=args.ssh_user,
+            )
+            if result.stdout:
+                print(result.stdout.rstrip())
+            if result.returncode != 0:
+                rc = result.returncode
+                print(f"[WARN] readback failed on {host}: exit={result.returncode}", file=sys.stderr)
+                if result.stderr:
+                    print(result.stderr.rstrip(), file=sys.stderr)
+
     return rc
 
 
