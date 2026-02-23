@@ -3,12 +3,16 @@
 
 This utility reuses the same DVFS path as main_controller:
   managers.dvfs_manager.DVFSManager -> dvfs.apply_reduction -> geopm_apply.sh
+
+If you do not have a running job, this utility can submit a basic sleep job,
+wait for RUNNING, apply/read the sweep, then cancel it automatically.
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
+import re
 import shlex
 import socket
 import subprocess
@@ -110,11 +114,115 @@ def _print_readback(host_map: Dict[str, List[int]], *, signal: str, domain: str,
     return rc
 
 
+def _parse_job_id(text: str) -> str | None:
+    output = (text or "").strip()
+    if not output:
+        return None
+    if output.isdigit():
+        return output
+    if ";" in output:
+        first = output.split(";", 1)[0].strip()
+        if first.isdigit():
+            return first
+    match = re.search(r"Submitted batch job\s+(\d+)", output)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _submit_basic_job(args: argparse.Namespace) -> str:
+    wrap_cmd = (
+        "echo '[sample-dvfs] basic job started on $(hostname)'; "
+        f"sleep {int(args.basic_sleep_seconds)}"
+    )
+    cmd = [
+        "sbatch",
+        "--parsable",
+        "-p",
+        args.basic_partition,
+        "-N",
+        str(args.basic_nodes),
+        "-n",
+        str(args.basic_ranks),
+        "-c",
+        str(args.basic_cpus_per_task),
+        "-t",
+        args.basic_time_limit,
+        "--job-name",
+        args.basic_job_name,
+        "--wrap",
+        wrap_cmd,
+    ]
+    if args.basic_nodelist:
+        cmd += ["--nodelist", args.basic_nodelist]
+    if args.basic_exclude:
+        cmd += ["--exclude", args.basic_exclude]
+
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"sbatch failed (exit {result.returncode}): "
+            f"{(result.stdout or '').strip()} {(result.stderr or '').strip()}"
+        )
+    job_id = _parse_job_id(result.stdout) or _parse_job_id(result.stderr)
+    if not job_id:
+        raise RuntimeError(
+            f"Unable to parse job id from sbatch output: "
+            f"{(result.stdout or '').strip()} {(result.stderr or '').strip()}"
+        )
+    return job_id
+
+
+def _wait_for_running(job_id: str, timeout_s: int) -> str | None:
+    terminal = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY"}
+    deadline = time.time() + max(1, int(timeout_s))
+    last_state: str | None = None
+    while time.time() < deadline:
+        proc = subprocess.run(
+            ["squeue", "-h", "-j", job_id, "-o", "%T"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            state = proc.stdout.strip() or None
+            if state:
+                last_state = state
+                if state == "RUNNING":
+                    return state
+                if state in terminal:
+                    return state
+        time.sleep(2.0)
+    return last_state
+
+
+def _cancel_job(job_id: str) -> None:
+    proc = subprocess.run(
+        ["scancel", job_id],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if proc.returncode == 0:
+        print(f"[INFO] canceled submitted job {job_id}")
+        return
+    details = (proc.stderr or proc.stdout or "").strip()
+    print(f"[WARN] failed to cancel submitted job {job_id}: {details}", file=sys.stderr)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Apply a max->min DVFS sweep for a Slurm job and read back GEOPM controls."
     )
-    p.add_argument("job_id", help="Slurm job id currently running")
+    p.add_argument("job_id", nargs="?", help="Slurm job id currently running")
     p.add_argument(
         "--max-freq-mhz",
         type=float,
@@ -170,6 +278,71 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not apply changes; only show what would be done",
     )
+    p.add_argument(
+        "--submit-basic-job",
+        action="store_true",
+        help="Submit a basic sleep job, wait for RUNNING, then apply/read the sweep",
+    )
+    p.add_argument(
+        "--basic-job-name",
+        default="sample-dvfs-basic",
+        help="Job name for --submit-basic-job",
+    )
+    p.add_argument(
+        "--basic-partition",
+        default="debug",
+        help="Partition for --submit-basic-job",
+    )
+    p.add_argument(
+        "--basic-time-limit",
+        default="00:20:00",
+        help="Time limit for --submit-basic-job",
+    )
+    p.add_argument(
+        "--basic-nodes",
+        type=int,
+        default=1,
+        help="Node count for --submit-basic-job",
+    )
+    p.add_argument(
+        "--basic-ranks",
+        type=int,
+        default=1,
+        help="MPI ranks for --submit-basic-job",
+    )
+    p.add_argument(
+        "--basic-cpus-per-task",
+        type=int,
+        default=10,
+        help="CPUs per task for --submit-basic-job",
+    )
+    p.add_argument(
+        "--basic-sleep-seconds",
+        type=int,
+        default=1200,
+        help="Sleep duration inside --submit-basic-job",
+    )
+    p.add_argument(
+        "--basic-nodelist",
+        default=None,
+        help="Optional --nodelist for --submit-basic-job",
+    )
+    p.add_argument(
+        "--basic-exclude",
+        default=None,
+        help="Optional --exclude for --submit-basic-job",
+    )
+    p.add_argument(
+        "--wait-running-timeout",
+        type=int,
+        default=180,
+        help="Seconds to wait for job to reach RUNNING before aborting",
+    )
+    p.add_argument(
+        "--keep-submitted-job",
+        action="store_true",
+        help="Do not cancel auto-submitted job after sweep",
+    )
     return p
 
 
@@ -185,14 +358,51 @@ def main(argv: list[str] | None = None) -> int:
     if args.interval_mhz <= 0:
         print("[ERR] interval must be positive", file=sys.stderr)
         return 2
+    if args.submit_basic_job and args.job_id:
+        print(
+            "[ERR] Provide either <job_id> or --submit-basic-job, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.submit_basic_job and not args.job_id:
+        print(
+            "[ERR] Missing <job_id>. Provide a running job id or use --submit-basic-job",
+            file=sys.stderr,
+        )
+        return 2
 
-    try:
-        state, host_map = collect_host_cores(args.job_id)
-    except Exception as exc:
-        print(f"[ERR] Could not discover job cores for {args.job_id}: {exc}", file=sys.stderr)
+    submitted_job_id: str | None = None
+    job_id = args.job_id
+    if args.submit_basic_job:
+        try:
+            submitted_job_id = _submit_basic_job(args)
+        except Exception as exc:
+            print(f"[ERR] Failed to submit basic job: {exc}", file=sys.stderr)
+            return 3
+        job_id = submitted_job_id
+        print(f"[INFO] submitted basic job: {job_id}")
+
+    assert job_id is not None
+    wait_state = _wait_for_running(job_id, args.wait_running_timeout)
+    if wait_state != "RUNNING":
+        print(
+            f"[ERR] Job {job_id} did not reach RUNNING within {args.wait_running_timeout}s "
+            f"(last_state={wait_state or 'UNKNOWN'})",
+            file=sys.stderr,
+        )
+        if submitted_job_id and not args.keep_submitted_job:
+            _cancel_job(submitted_job_id)
         return 3
 
-    print(f"[INFO] job={args.job_id} state={state or 'UNKNOWN'} hosts={len(host_map)}")
+    try:
+        state, host_map = collect_host_cores(job_id)
+    except Exception as exc:
+        print(f"[ERR] Could not discover job cores for {job_id}: {exc}", file=sys.stderr)
+        if submitted_job_id and not args.keep_submitted_job:
+            _cancel_job(submitted_job_id)
+        return 3
+
+    print(f"[INFO] job={job_id} state={state or 'UNKNOWN'} hosts={len(host_map)}")
     print(
         f"[INFO] sweep max={args.max_freq_mhz:.3f}MHz min={args.min_freq_mhz:.3f}MHz "
         f"interval={args.interval_mhz}MHz"
@@ -216,35 +426,39 @@ def main(argv: list[str] | None = None) -> int:
         targets.append(min_mhz)
 
     overall_rc = 0
-    for target in targets:
-        bounded_target, reduction = _target_to_reduction(
-            float(target),
-            max_freq_mhz=args.max_freq_mhz,
-            min_freq_mhz=args.min_freq_mhz,
-        )
-        print(
-            f"\n[STEP] target={target}MHz bounded={bounded_target:.3f}MHz "
-            f"reduction={reduction:.6f}"
-        )
-        try:
-            mgr.submit_reduction(args.job_id, reduction, dry_run=args.dry_run)
-        except Exception as exc:
-            print(f"[ERR] DVFS apply failed at {target}MHz: {exc}", file=sys.stderr)
-            return 4
+    try:
+        for target in targets:
+            bounded_target, reduction = _target_to_reduction(
+                float(target),
+                max_freq_mhz=args.max_freq_mhz,
+                min_freq_mhz=args.min_freq_mhz,
+            )
+            print(
+                f"\n[STEP] target={target}MHz bounded={bounded_target:.3f}MHz "
+                f"reduction={reduction:.6f}"
+            )
+            try:
+                mgr.submit_reduction(job_id, reduction, dry_run=args.dry_run)
+            except Exception as exc:
+                print(f"[ERR] DVFS apply failed at {target}MHz: {exc}", file=sys.stderr)
+                return 4
 
-        if args.dry_run:
-            continue
+            if args.dry_run:
+                continue
 
-        if args.wait_seconds > 0:
-            time.sleep(args.wait_seconds)
-        rc = _print_readback(
-            host_map,
-            signal=args.read_signal,
-            domain=args.read_domain,
-            ssh_user=args.ssh_user,
-        )
-        if rc != 0:
-            overall_rc = rc
+            if args.wait_seconds > 0:
+                time.sleep(args.wait_seconds)
+            rc = _print_readback(
+                host_map,
+                signal=args.read_signal,
+                domain=args.read_domain,
+                ssh_user=args.ssh_user,
+            )
+            if rc != 0:
+                overall_rc = rc
+    finally:
+        if submitted_job_id and not args.keep_submitted_job and not args.dry_run:
+            _cancel_job(submitted_job_id)
 
     return overall_rc
 
