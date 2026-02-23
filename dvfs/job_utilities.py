@@ -187,6 +187,7 @@ MAX_FREQ_MHZ_DEFAULT = 2200.0
 MIN_FREQ_MHZ_DEFAULT = 800.0
 CONFIG_DIR_DEFAULT = "/shared/geopm/freq"
 NODES_FILE_DEFAULT = (Path(__file__).resolve().parent.parent / "data" / "nodes.txt").resolve()
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class SetJobFrequencyError(RuntimeError):
@@ -421,8 +422,23 @@ def build_sbatch_variations(
             return None
         return ranks, nodes
 
-    # Optional per-variation pinning map (variants, nodelist, exclude, ranksize)
-    pinmap = _load_pinning_map(Path("data/record_pinning.csv"))
+    slurm_file = Path(script_list_path)
+    if not slurm_file.exists():
+        repo_candidate = (_REPO_ROOT / slurm_file).resolve()
+        if repo_candidate.exists():
+            slurm_file = repo_candidate
+    if not slurm_file.exists():
+        raise FileNotFoundError(f"slurm script list not found: {slurm_file}")
+
+    # Optional per-variation pinning map (variants, nodelist, exclude, ranksize).
+    # Prefer pinning next to the script list, then fall back to repo/data.
+    pinning_candidates = [
+        slurm_file.parent / "record_pinning.csv",
+        _REPO_ROOT / "data" / "record_pinning.csv",
+        Path("data/record_pinning.csv"),
+    ]
+    pinning_path = next((p for p in pinning_candidates if p.exists()), None)
+    pinmap = _load_pinning_map(pinning_path) if pinning_path else {}
 
     variations: List[Tuple[str, int, int, Optional[int]]] = []
     if pinmap:
@@ -449,10 +465,6 @@ def build_sbatch_variations(
             ("2r1n", 1, 2, 2),
             ("4r2n", 2, 4, 2),
         ]
-
-    slurm_file = Path(script_list_path)
-    if not slurm_file.exists():
-        raise FileNotFoundError(f"slurm script list not found: {slurm_file}")
 
     commands: List[List[str]] = []
 
@@ -504,7 +516,19 @@ def build_sbatch_variations(
             tokens = shlex.split(line)
             if not tokens:
                 continue
-            script_path = Path(tokens[0])
+            script_token = Path(tokens[0])
+            if script_token.is_absolute():
+                script_path = script_token
+            else:
+                script_candidates = [
+                    script_token,
+                    slurm_file.parent / script_token,
+                    _REPO_ROOT / script_token,
+                ]
+                script_path = next(
+                    (p.resolve() for p in script_candidates if p.exists()),
+                    (_REPO_ROOT / script_token).resolve(),
+                )
             overrides: Dict[str, str] = {}
             for tok in tokens[1:]:
                 if '=' in tok:
@@ -531,7 +555,7 @@ def build_sbatch_variations(
                         pass
                 cmd: List[str] = [
                     "python3",
-                    "utilities/submit_benchmark.py",
+                    str((_REPO_ROOT / "utilities" / "submit_benchmark.py").resolve()),
                     "-N", str(nodes),
                     "-n", str(ntasks),
                     "-c", str(c_val),
