@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import shlex
 import socket
 import subprocess
 import sys
@@ -123,8 +124,9 @@ def _read_host(
         )
 
     target = f"{ssh_user}@{host}" if ssh_user else host
+    remote_exec = f"bash -lc {shlex.quote(remote_cmd)}"
     return subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target, "bash", "-lc", remote_cmd],
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target, remote_exec],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
