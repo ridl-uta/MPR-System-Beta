@@ -28,12 +28,30 @@ import subprocess
 from pathlib import Path
 
 
-def detect_table_type(table: Path) -> str:
+def detect_table_type(table: Path, script: str | None = None) -> str:
     """Detect the benchmark table type by header columns.
 
-    Returns 'xsbench' for ranks/size/lookups tables, or 'hpccg' for
-    ranks/nx/ny/nz. Defaults to 'xsbench' if detection fails.
+    Returns 'xsbench' for ranks/size/lookups tables, 'hpccg' for
+    HPCCG-style ranks/nx/ny/nz, or 'hpcg' for HPCG-style ranks/nx/ny/nz.
+    Defaults to 'xsbench' if detection fails.
     """
+    def _name_to_type(name: str) -> str | None:
+        lower = name.lower()
+        if "hpccg" in lower:
+            return "hpccg"
+        if "hpcg" in lower:
+            return "hpcg"
+        return None
+
+    if script:
+        script_type = _name_to_type(Path(script).stem)
+        if script_type:
+            return script_type
+
+    table_name_type = _name_to_type(table.stem)
+    if table_name_type:
+        return table_name_type
+
     if not table.exists():
         return "xsbench"
     with table.open() as f:
@@ -71,7 +89,7 @@ def read_args_row(table: Path, ranks: int) -> tuple[str | None, int | None]:
     return None, None
 
 
-def read_hpccg_args_row(table: Path, ranks: int) -> tuple[int | None, int | None, int | None]:
+def read_grid_args_row(table: Path, ranks: int) -> tuple[int | None, int | None, int | None]:
     if not table.exists():
         return None, None, None
     with table.open() as f:
@@ -89,10 +107,7 @@ def read_hpccg_args_row(table: Path, ranks: int) -> tuple[int | None, int | None
                     return int(v) if v is not None and v.strip() != "" else None
                 except (ValueError, TypeError):
                     return None
-            nx = _as_int("nx")
-            ny = _as_int("ny")
-            nz = _as_int("nz")
-            return nx, ny, nz
+            return _as_int("nx"), _as_int("ny"), _as_int("nz")
     return None, None, None
 
 
@@ -268,6 +283,66 @@ def build_sbatch_wrap_hpccg(
     return cmd
 
 
+def build_sbatch_wrap_hpcg(
+    *,
+    nodes: int,
+    ranks: int,
+    cpus_per_task: int,
+    partition: str,
+    time_limit: str,
+    output: str,
+    nodelist: str | None,
+    exclude: str | None,
+    ntasks_per_node: int | None,
+    mpi_iface: str,
+    bench_bin: str,
+    workdir: str | None,
+    nx: int,
+    ny: int,
+    nz: int,
+) -> list[str]:
+    env_exports = {
+        "OMP_NUM_THREADS": str(cpus_per_task),
+        "OMP_PROC_BIND": "close",
+        "OMP_PLACES": "cores",
+    }
+    export_str = ",".join(f"{k}={v}" for k, v in env_exports.items())
+    cd_prefix = (
+        f"cd {shlex.quote(workdir)}; " if workdir else "cd ${WORKDIR:-/shared/src/hpcg/hpcg-3.1/build_mpi_omp/bin}; "
+    )
+    srun_cmd = (
+        f"{cd_prefix}"
+        f"srun --mpi={shlex.quote(mpi_iface)} --cpu-bind=cores "
+        f"--hint=nomultithread --distribution=block:block "
+        f"{shlex.quote(bench_bin)} {nx} {ny} {nz} || true"
+    )
+
+    cmd = [
+        "sbatch",
+        "-p",
+        partition,
+        "-N",
+        str(nodes),
+        "-n",
+        str(ranks),
+        "-c",
+        str(cpus_per_task),
+        "-t",
+        time_limit,
+        "--export=ALL," + export_str,
+        "-o",
+        output,
+    ]
+    if ntasks_per_node:
+        cmd += ["--ntasks-per-node", str(ntasks_per_node)]
+    if nodelist:
+        cmd += ["--nodelist", nodelist]
+    if exclude:
+        cmd += ["--exclude", exclude]
+    cmd += ["--wrap", srun_cmd]
+    return cmd
+
+
 def build_sbatch_wrap_minife(
     *,
     nodes: int,
@@ -339,7 +414,20 @@ def main() -> int:
     ap.add_argument("--nodelist", default=None)
     ap.add_argument("--exclude", default=None)
     ap.add_argument("--mpi", dest="mpi_iface", default="pmi2", choices=["pmi2", "pmix"])
-    ap.add_argument("--table", default=str(Path("data/xsbench_args.csv")), help="CSV with ranks,size,lookups_per_rank")
+    ap.add_argument(
+        "--table",
+        default=str(Path("data/xsbench_args.csv")),
+        help="CSV args table (xsbench: ranks,size,lookups; hpcg/hpccg: ranks,nx,ny,nz)",
+    )
+    ap.add_argument(
+        "--table-type",
+        choices=["auto", "xsbench", "hpccg", "hpcg"],
+        default="auto",
+        help="Override table type detection",
+    )
+    ap.add_argument("--nx", type=int, default=None, help="Override NX from CSV for hpcg/hpccg")
+    ap.add_argument("--ny", type=int, default=None, help="Override NY from CSV for hpcg/hpccg")
+    ap.add_argument("--nz", type=int, default=None, help="Override NZ from CSV for hpcg/hpccg")
     ap.add_argument("--size", default=None, help="Override size from CSV")
     ap.add_argument("--lookups", type=int, default=None, help="Override lookups per rank from CSV")
     ap.add_argument("--bin", dest="bench_bin", default="./XSBenchMPI", help="Path to benchmark binary (default ./XSBenchMPI)")
@@ -349,13 +437,17 @@ def main() -> int:
     args = ap.parse_args()
 
     table = Path(args.table)
-    table_type = detect_table_type(table)
-    if table_type == "hpccg":
-        nx, ny, nz = read_hpccg_args_row(table, args.ranks)
-        # Fallback if table missing: use 180^3
-        nx = nx or 180
-        ny = ny or 180
-        nz = nz or 180
+    table_type = (
+        detect_table_type(table, args.script)
+        if args.table_type == "auto"
+        else args.table_type
+    )
+    if table_type in {"hpccg", "hpcg"}:
+        nx_csv, ny_csv, nz_csv = read_grid_args_row(table, args.ranks)
+        default_grid = (180, 180, 180) if table_type == "hpccg" else (64, 64, 64)
+        nx = args.nx if args.nx is not None else (nx_csv if nx_csv is not None else default_grid[0])
+        ny = args.ny if args.ny is not None else (ny_csv if ny_csv is not None else default_grid[1])
+        nz = args.nz if args.nz is not None else (nz_csv if nz_csv is not None else default_grid[2])
         if args.script:
             env_vars: dict[str, str] = {"NX": str(nx), "NY": str(ny), "NZ": str(nz)}
             if args.mpi_iface:
@@ -376,7 +468,12 @@ def main() -> int:
                 env_vars=env_vars,
             )
         else:
-            cmd = build_sbatch_wrap_hpccg(
+            if args.bench_bin == "./XSBenchMPI":
+                args.bench_bin = "./test_HPCCG_mpi" if table_type == "hpccg" else "./xhpcg"
+            build_wrap = (
+                build_sbatch_wrap_hpccg if table_type == "hpccg" else build_sbatch_wrap_hpcg
+            )
+            cmd = build_wrap(
                 nodes=args.nodes,
                 ranks=args.ranks,
                 cpus_per_task=args.cpus_per_task,
