@@ -672,7 +672,7 @@ def main() -> int:
                 nz=nz,
             )
     elif table_type in {"minimd", "comd"}:
-        default_bench_args = "-i in.lj.miniMD" if table_type == "minimd" else "-x 40 -y 40 -z 40 -N 100"
+        default_bench_args = "-i in.lj.miniMD" if table_type == "minimd" else "-x 40 -y 40 -z 40 -N 1000"
         bench_args_raw = args.bench_args or read_benchmark_args_row(table, args.ranks) or default_bench_args
         try:
             bench_args = shlex.split(bench_args_raw)

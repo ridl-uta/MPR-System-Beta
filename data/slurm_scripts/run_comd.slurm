@@ -20,7 +20,7 @@ elif [[ -n "${COMD_ARGS:-}" ]]; then
   eval "set -- ${COMD_ARGS}"
   RUN_ARGS=("$@")
 else
-  RUN_ARGS=(-x 40 -y 40 -z 40 -N 100)
+  RUN_ARGS=(-x 40 -y 40 -z 40 -N 1000)
 fi
 
 # Use the PMI2-enabled Open MPI stack and pin traffic to eno1.
