@@ -37,10 +37,13 @@ def detect_table_type(table: Path, script: str | None = None) -> str:
       - 'hpcg' for HPCG-style ranks/nx/ny/nz
       - 'minife' for miniFE-style ranks/nx/ny/nz
       - 'minimd' for miniMD-style ranks,args
+      - 'comd' for CoMD-style ranks,args
     Defaults to 'xsbench' if detection fails.
     """
     def _name_to_type(name: str) -> str | None:
         lower = name.lower()
+        if "comd" in lower:
+            return "comd"
         if "hpccg" in lower:
             return "hpccg"
         if "hpcg" in lower:
@@ -68,8 +71,9 @@ def detect_table_type(table: Path, script: str | None = None) -> str:
         except StopIteration:
             return "xsbench"
     cols = {h.strip().lower() for h in header}
-    if "args" in cols or "minimd_args" in cols:
-        return "minimd"
+    if "args" in cols or "minimd_args" in cols or "comd_args" in cols:
+        lower_stem = table.stem.lower()
+        return "comd" if "comd" in lower_stem else "minimd"
     if {"nx", "ny", "nz"}.issubset(cols):
         return "minife" if "minife" in table.stem.lower() else "hpccg"
     if {"size"}.issubset(cols) and ("lookups_per_rank" in cols or "lookups" in cols):
@@ -121,7 +125,7 @@ def read_grid_args_row(table: Path, ranks: int) -> tuple[int | None, int | None,
     return None, None, None
 
 
-def read_minimd_args_row(table: Path, ranks: int) -> str | None:
+def read_benchmark_args_row(table: Path, ranks: int) -> str | None:
     if not table.exists():
         return None
     with table.open() as f:
@@ -136,6 +140,7 @@ def read_minimd_args_row(table: Path, ranks: int) -> str | None:
             args = (
                 (row.get("args") or "")
                 or (row.get("minimd_args") or "")
+                or (row.get("comd_args") or "")
                 or (row.get("bench_args") or "")
             )
             args = args.strip()
@@ -497,6 +502,65 @@ def build_sbatch_wrap_minimd(
     return cmd
 
 
+def build_sbatch_wrap_comd(
+    *,
+    nodes: int,
+    ranks: int,
+    cpus_per_task: int,
+    partition: str,
+    time_limit: str,
+    output: str,
+    nodelist: str | None,
+    exclude: str | None,
+    ntasks_per_node: int | None,
+    mpi_iface: str,
+    bench_bin: str,
+    workdir: str | None,
+    comd_args: list[str],
+) -> list[str]:
+    env_exports = {
+        "OMP_NUM_THREADS": str(cpus_per_task),
+        "OMP_PROC_BIND": "close",
+        "OMP_PLACES": "cores",
+    }
+    export_str = ",".join(f"{k}={v}" for k, v in env_exports.items())
+    cd_prefix = (
+        f"cd {shlex.quote(workdir)}; " if workdir else "cd ${WORKDIR:-/shared/src/CoMD}; "
+    )
+    args_str = " ".join(shlex.quote(token) for token in comd_args)
+    srun_cmd = (
+        f"{cd_prefix}"
+        f"srun --mpi={shlex.quote(mpi_iface)} --cpu-bind=cores "
+        f"--hint=nomultithread --distribution=block:block "
+        f"{shlex.quote(bench_bin)} {args_str} || true"
+    )
+
+    cmd = [
+        "sbatch",
+        "-p",
+        partition,
+        "-N",
+        str(nodes),
+        "-n",
+        str(ranks),
+        "-c",
+        str(cpus_per_task),
+        "-t",
+        time_limit,
+        "--export=ALL," + export_str,
+        "-o",
+        output,
+    ]
+    if ntasks_per_node:
+        cmd += ["--ntasks-per-node", str(ntasks_per_node)]
+    if nodelist:
+        cmd += ["--nodelist", nodelist]
+    if exclude:
+        cmd += ["--exclude", exclude]
+    cmd += ["--wrap", srun_cmd]
+    return cmd
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Submit MPI+threads benchmark using CSV args")
     ap.add_argument("-N", "--nodes", type=int, default=1, help="Slurm nodes (-N)")
@@ -515,12 +579,12 @@ def main() -> int:
         help=(
             "CSV args table "
             "(xsbench: ranks,size,lookups; hpcg/hpccg/minife: ranks,nx,ny,nz; "
-            "minimd: ranks,args)"
+            "minimd/comd: ranks,args)"
         ),
     )
     ap.add_argument(
         "--table-type",
-        choices=["auto", "xsbench", "hpccg", "hpcg", "minife", "minimd"],
+        choices=["auto", "xsbench", "hpccg", "hpcg", "minife", "minimd", "comd"],
         default="auto",
         help="Override table type detection",
     )
@@ -532,7 +596,7 @@ def main() -> int:
     ap.add_argument(
         "--bench-args",
         default=None,
-        help="Override benchmark argument string (used by miniMD)",
+        help="Override benchmark argument string (used by miniMD/CoMD)",
     )
     ap.add_argument("--bin", dest="bench_bin", default="./XSBenchMPI", help="Path to benchmark binary (default ./XSBenchMPI)")
     ap.add_argument("--workdir", default=None, help="Working directory to cd before running (optional)")
@@ -607,14 +671,15 @@ def main() -> int:
                 ny=ny,
                 nz=nz,
             )
-    elif table_type == "minimd":
-        minimd_args_raw = args.bench_args or read_minimd_args_row(table, args.ranks) or "-i in.lj.miniMD"
+    elif table_type in {"minimd", "comd"}:
+        default_bench_args = "-i in.lj.miniMD" if table_type == "minimd" else "-x 40 -y 40 -z 40 -N 100"
+        bench_args_raw = args.bench_args or read_benchmark_args_row(table, args.ranks) or default_bench_args
         try:
-            minimd_args = shlex.split(minimd_args_raw)
+            bench_args = shlex.split(bench_args_raw)
         except ValueError as exc:
-            raise SystemExit(f"Invalid miniMD args string: {exc}") from exc
-        if not minimd_args:
-            minimd_args = ["-i", "in.lj.miniMD"]
+            raise SystemExit(f"Invalid benchmark args string: {exc}") from exc
+        if not bench_args:
+            bench_args = shlex.split(default_bench_args)
 
         if args.script:
             env_vars: dict[str, str] = {}
@@ -623,7 +688,8 @@ def main() -> int:
             if args.workdir:
                 env_vars["WORKDIR"] = args.workdir
             if args.bench_bin and args.bench_bin != "./XSBenchMPI":
-                env_vars["MINIMD_BIN"] = args.bench_bin
+                bin_env_key = "MINIMD_BIN" if table_type == "minimd" else "COMD_BIN"
+                env_vars[bin_env_key] = args.bench_bin
             cmd = build_sbatch_script(
                 nodes=args.nodes,
                 ranks=args.ranks,
@@ -636,26 +702,43 @@ def main() -> int:
                 ntasks_per_node=args.ntasks_per_node,
                 script_path=args.script,
                 env_vars=env_vars,
-                script_args=minimd_args,
+                script_args=bench_args,
             )
         else:
             if args.bench_bin == "./XSBenchMPI":
-                args.bench_bin = "./miniMD_openmpi"
-            cmd = build_sbatch_wrap_minimd(
-                nodes=args.nodes,
-                ranks=args.ranks,
-                cpus_per_task=args.cpus_per_task,
-                partition=args.partition,
-                time_limit=args.time_limit,
-                output=args.output,
-                nodelist=args.nodelist,
-                exclude=args.exclude,
-                ntasks_per_node=args.ntasks_per_node,
-                mpi_iface=args.mpi_iface,
-                bench_bin=args.bench_bin,
-                workdir=args.workdir,
-                minimd_args=minimd_args,
-            )
+                args.bench_bin = "./miniMD_openmpi" if table_type == "minimd" else "./bin/CoMD-openmp-mpi"
+            if table_type == "minimd":
+                cmd = build_sbatch_wrap_minimd(
+                    nodes=args.nodes,
+                    ranks=args.ranks,
+                    cpus_per_task=args.cpus_per_task,
+                    partition=args.partition,
+                    time_limit=args.time_limit,
+                    output=args.output,
+                    nodelist=args.nodelist,
+                    exclude=args.exclude,
+                    ntasks_per_node=args.ntasks_per_node,
+                    mpi_iface=args.mpi_iface,
+                    bench_bin=args.bench_bin,
+                    workdir=args.workdir,
+                    minimd_args=bench_args,
+                )
+            else:
+                cmd = build_sbatch_wrap_comd(
+                    nodes=args.nodes,
+                    ranks=args.ranks,
+                    cpus_per_task=args.cpus_per_task,
+                    partition=args.partition,
+                    time_limit=args.time_limit,
+                    output=args.output,
+                    nodelist=args.nodelist,
+                    exclude=args.exclude,
+                    ntasks_per_node=args.ntasks_per_node,
+                    mpi_iface=args.mpi_iface,
+                    bench_bin=args.bench_bin,
+                    workdir=args.workdir,
+                    comd_args=bench_args,
+                )
     else:
         size_csv, lookups_csv = read_args_row(table, args.ranks)
         size = args.size or size_csv or "small"
