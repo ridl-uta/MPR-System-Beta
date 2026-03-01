@@ -1,0 +1,7 @@
+numpy
+pandas
+scipy
+python-socketio
+werkzeug
+openpyxl
+requests

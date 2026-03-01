@@ -1,0 +1,4 @@
+ranks,size,lookups_per_rank
+1,small,4000
+2,small,2000
+4,small,1000

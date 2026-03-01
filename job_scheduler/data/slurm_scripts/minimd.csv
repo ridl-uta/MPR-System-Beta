@@ -1,0 +1,7 @@
+ranks,args
+1,-i in.lj.miniMD -n 6000 -t 10
+2,-i in.lj.miniMD -n 6000 -t 10
+4,-i in.lj.miniMD -n 6000 -t 10
+6,-i in.lj.miniMD -n 6000 -t 10
+8,-i in.lj.miniMD -n 6000 -t 10
+10,-i in.lj.miniMD -n 6000 -t 10

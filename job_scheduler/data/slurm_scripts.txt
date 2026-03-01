@@ -1,0 +1,21 @@
+# Slurm scripts to be submitted by the controller
+# One entry per line; optional key=value overrides after the path.
+# Supported overrides today: workdir=</path> (and bin=</path/to/binary>)
+
+# XSBench (MPI+OpenMP)
+data/slurm_scripts/run_xsbenchmpi.slurm workdir=/shared/bin
+
+# HPCCG (MPI)
+data/slurm_scripts/run_hpccg.slurm workdir=/shared/src/HPCCG
+
+# miniFE (MPI+OpenMP)
+data/slurm_scripts/run_minife.slurm workdir=/shared/src/miniFE/openmp-opt/src
+
+# CoMD (MPI+OpenMP)
+data/slurm_scripts/run_comd.slurm workdir=/shared/src/CoMD bin=./bin/CoMD-openmp-mpi
+
+# miniMD (MPI+OpenMP)
+data/slurm_scripts/run_minimd.slurm workdir=/shared/src/miniMD/ref bin=./miniMD_openmpi
+
+# HPCG (MPI+OpenMP hybrid)
+data/slurm_scripts/run_hpcg.slurm workdir=/shared/src/hpcg/hpcg-3.1/build_mpi_omp/bin
