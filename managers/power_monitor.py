@@ -333,8 +333,9 @@ class PowerMonitor:
         self._od_ctx['last_raw_sample'] = raw_total
 
         if self._load_shedder:
-            peak_raw = self._od_ctx.get('peak_window_max_raw', raw_total)
-            reduction = max(0.0, peak_raw - adjusted_total)
+            # Dynamic low threshold follows currently-applied reduction so
+            # END can trigger only when raw-equivalent power would clear T_high.
+            reduction = max(0.0, raw_total - adjusted_total)
             if self._load_shedder.active and reduction > 0:
                 base_low = self._od_ctx['T_high'] - self._od_ctx['min_hysteresis']
                 new_low = max(0.0, self._od_ctx['T_high'] - reduction)

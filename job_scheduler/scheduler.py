@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -39,6 +40,7 @@ class JobScheduler:
         # Cache loaded performance inputs so market modules can fetch them directly.
         self._job_perf_data_cache: Dict[str, pd.DataFrame] = {}
         self._perf_audit_rows: List[Dict[str, Any]] = []
+        self._submission_rows: List[Dict[str, Any]] = []
 
         self.helper = helper_utility or SlurmHelperUtility()
         if not self.source_scripts_dir.exists():
@@ -55,6 +57,23 @@ class JobScheduler:
             if name.startswith("run_"):
                 jobs.append(name[4:])
         return jobs
+
+    @staticmethod
+    def _resolve_job_ranks(
+        *,
+        job_ranks: Dict[str, int] | None = None,
+        name: str | None = None,
+        ranks: int | None = None,
+    ) -> Dict[str, int]:
+        resolved_job_ranks = dict(job_ranks or {})
+        if not resolved_job_ranks:
+            if name is None or ranks is None:
+                raise ValueError("Provide either job_ranks or both name and ranks.")
+            resolved_job_ranks[name] = int(ranks)
+        return resolved_job_ranks
+
+    def _record_submission_row(self, row: Dict[str, Any]) -> None:
+        self._submission_rows.append(dict(row))
 
     def submit_job(
         self,
@@ -76,7 +95,7 @@ class JobScheduler:
 
         script_path = self.get_script_path(name)
         if not script_path.exists():
-            return {
+            row = {
                 "job": name,
                 "ranks": int(ranks),
                 "script": str(script_path),
@@ -84,6 +103,8 @@ class JobScheduler:
                 "command": "",
                 "message": "script not found in module data scripts",
             }
+            self._record_submission_row(row)
+            return row
 
         cmd, nodes, ntasks_per_node = self.helper.build_submit_command(
             script_path=script_path,
@@ -110,6 +131,7 @@ class JobScheduler:
             }
             if auto_load_perf_data:
                 self._auto_load_perf_data_for_jobs([name])
+            self._record_submission_row(row)
             return row
 
         proc = self.helper.run_command(cmd)
@@ -132,6 +154,7 @@ class JobScheduler:
         }
         if auto_load_perf_data:
             self._auto_load_perf_data_for_jobs([name])
+        self._record_submission_row(row)
         return row
 
     def submit_jobs(
@@ -155,11 +178,11 @@ class JobScheduler:
         - Multi-job: submit_jobs(job_ranks={"comd": 1, "hpcg": 4}, ...)
         - Single-job: submit_jobs(name="comd", ranks=1, ...)
         """
-        resolved_job_ranks = dict(job_ranks or {})
-        if not resolved_job_ranks:
-            if name is None or ranks is None:
-                raise ValueError("Provide either job_ranks or both name and ranks.")
-            resolved_job_ranks[name] = int(ranks)
+        resolved_job_ranks = self._resolve_job_ranks(
+            job_ranks=job_ranks,
+            name=name,
+            ranks=ranks,
+        )
 
         rows: List[Dict[str, Any]] = []
         for job_name, rank_count in resolved_job_ranks.items():
@@ -179,11 +202,127 @@ class JobScheduler:
 
         return pd.DataFrame(rows)
 
+    def submit_jobs_periodic(
+        self,
+        *,
+        job_ranks: Dict[str, int] | None = None,
+        name: str | None = None,
+        ranks: int | None = None,
+        cpus_per_rank: int,
+        ranks_per_node: int,
+        partition: str = "debug",
+        time_limit: str = "00:30:00",
+        nodelist: str | None = None,
+        exclude: str | None = None,
+        dry_run: bool = True,
+        auto_load_perf_data: bool = True,
+        submit_interval_s: float = 0.0,
+    ) -> pd.DataFrame:
+        """Submit jobs periodically with a fixed delay between submissions."""
+        if submit_interval_s < 0:
+            raise ValueError("submit_interval_s must be >= 0.")
+
+        resolved_job_ranks = self._resolve_job_ranks(
+            job_ranks=job_ranks,
+            name=name,
+            ranks=ranks,
+        )
+
+        items = list(resolved_job_ranks.items())
+        rows: List[Dict[str, Any]] = []
+        for index, (job_name, rank_count) in enumerate(items):
+            row = self.submit_job(
+                name=job_name,
+                cpus_per_rank=cpus_per_rank,
+                ranks_per_node=ranks_per_node,
+                ranks=int(rank_count),
+                nodelist=nodelist,
+                exclude=exclude,
+                partition=partition,
+                time_limit=time_limit,
+                dry_run=dry_run,
+                auto_load_perf_data=auto_load_perf_data,
+            )
+            row = dict(row)
+            row["submission_index"] = index
+            rows.append(row)
+
+            if index < len(items) - 1 and submit_interval_s > 0:
+                time.sleep(submit_interval_s)
+
+        return pd.DataFrame(rows)
+
     def list_running_jobs(self) -> List[tuple[str, str]]:
         return self.helper.list_running_jobs()
 
     def get_job_resource_allocation(self, job_id: str) -> Dict[str, Any]:
         return self.helper.get_job_resource_allocation(job_id)
+
+    def get_submission_history(self, *, job_names: List[str] | None = None) -> pd.DataFrame:
+        """Return previously attempted submissions from this scheduler instance."""
+        history = pd.DataFrame(self._submission_rows)
+        if history.empty or job_names is None:
+            return history
+        if "job" not in history.columns:
+            return history
+        return history[history["job"].isin(job_names)].reset_index(drop=True)
+
+    def get_job_allocation_for_submitted(
+        self,
+        *,
+        job_name: str,
+        latest: bool = True,
+    ) -> Dict[str, Any]:
+        """Return node/core allocation for a submitted job name."""
+        history = self.get_submission_history(job_names=[job_name])
+        if history.empty:
+            raise RuntimeError(f"No submission history for job '{job_name}'.")
+
+        candidates = history[history.get("status").astype(str) == "SUBMITTED"] if "status" in history.columns else history
+        if candidates.empty or "job_id" not in candidates.columns:
+            raise RuntimeError(f"No submitted job_id found for job '{job_name}'.")
+
+        row = candidates.iloc[-1] if latest else candidates.iloc[0]
+        job_id = str(row["job_id"]).strip()
+        if not job_id or job_id.lower() in {"none", "nan"}:
+            raise RuntimeError(f"Submitted row for '{job_name}' does not contain a valid job_id.")
+
+        return self.get_job_resource_allocation(job_id)
+
+    def get_submitted_job_allocations(
+        self,
+        *,
+        job_names: List[str] | None = None,
+        latest_only: bool = True,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return per-job node/core allocations for submitted jobs."""
+        history = self.get_submission_history(job_names=job_names)
+        if history.empty:
+            return {}
+
+        if "status" in history.columns:
+            history = history[history["status"].astype(str) == "SUBMITTED"]
+        if history.empty or "job_id" not in history.columns or "job" not in history.columns:
+            return {}
+
+        allocations: Dict[str, Dict[str, Any]] = {}
+        if latest_only:
+            latest_rows = history.groupby("job", as_index=False).tail(1)
+            for _, row in latest_rows.iterrows():
+                job_name = str(row["job"])
+                job_id = str(row["job_id"]).strip()
+                if not job_id or job_id.lower() in {"none", "nan"}:
+                    continue
+                allocations[job_name] = self.get_job_resource_allocation(job_id)
+            return allocations
+
+        for _, row in history.iterrows():
+            job_name = str(row["job"])
+            job_id = str(row["job_id"]).strip()
+            if not job_id or job_id.lower() in {"none", "nan"}:
+                continue
+            allocations[f"{job_name}:{job_id}"] = self.get_job_resource_allocation(job_id)
+        return allocations
 
     def load_perf_data_for_jobs(
         self,

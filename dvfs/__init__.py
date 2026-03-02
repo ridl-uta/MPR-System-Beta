@@ -1,5 +1,6 @@
 """DVFS utilities package."""
 
+from .controller import DVFSController
 from .job_utilities import (
     CONFIG_DIR_DEFAULT,
     MAX_FREQ_MHZ_DEFAULT,
@@ -15,6 +16,7 @@ from .job_utilities import (
 )
 
 __all__ = [
+    "DVFSController",
     "JobCoresError",
     "MAX_FREQ_MHZ_DEFAULT",
     "MIN_FREQ_MHZ_DEFAULT",

@@ -2,6 +2,12 @@
 
 Minimal runbook to install the one‑shot service on nodes and trigger applies from a head/login node.
 
+## Install Python Dependencies
+From the repo root:
+```
+python3 -m pip install -r requirements.txt -r mpr_int/requirements.txt -r power_monitor/requirements.txt
+```
+
 ## Install On Each Compute Node
 - From the repo root on the node:
   - `sudo bash dvfs/install_geopm_apply_systemd.sh`

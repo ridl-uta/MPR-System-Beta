@@ -1,0 +1,8 @@
+# power_monitor module requirements
+#
+# Runtime note:
+# - This module currently uses Python stdlib `telnetlib` for APC PDU access.
+# - `telnetlib` was removed in Python 3.13.
+# - Use Python 3.12 or older for actual telnet polling.
+#
+# No additional pip package is required for telnet support on Python <= 3.12.

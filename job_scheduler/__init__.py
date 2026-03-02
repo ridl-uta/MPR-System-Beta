@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .helper_utility import SlurmHelperUtility
 from .performance_data import REQUIRED_PERF_COLUMNS, load_perf_data_for_jobs
-from .scheduler import JobScheduler
+from .scheduler import DEFAULT_PERF_SHEET_MAP, JobScheduler
 
 MODULE_ROOT = Path(__file__).resolve().parent
 MODULE_DATA_DIR = MODULE_ROOT / "data"
@@ -20,6 +20,7 @@ MODULE_PERF_DATA_XLSX = MODULE_DATA_DIR / "all_model_data.xlsx"
 __all__ = [
     "SlurmHelperUtility",
     "JobScheduler",
+    "DEFAULT_PERF_SHEET_MAP",
     "REQUIRED_PERF_COLUMNS",
     "load_perf_data_for_jobs",
     "MODULE_ROOT",
