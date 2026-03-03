@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Prototype runner for Slurm scheduling + MPR negotiation."""
+"""Main runner for Slurm scheduling, power monitoring, MPR negotiation, and DVFS apply."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import threading
 import time
 from typing import Any
@@ -18,7 +19,7 @@ from power_monitor import PowerMonitor
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run prototype Slurm + MPR flow from terminal.")
+    parser = argparse.ArgumentParser(description="Run Slurm + power + MPR + DVFS flow from terminal.")
     parser.add_argument("--dry-run", action="store_true", help="Preview sbatch commands only.")
     parser.add_argument("--skip-submit", action="store_true", help="Skip Slurm submission step.")
     parser.add_argument("--show-allocation", action="store_true", help="Query resource allocation for submitted jobs.")
@@ -41,6 +42,39 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--nodelist", default=None)
     parser.add_argument("--exclude", default=None)
+    parser.add_argument(
+        "--mpi-iface",
+        default=None,
+        choices=["pmi2", "pmix"],
+        help="Optional MPI interface export passed to Slurm jobs.",
+    )
+    parser.add_argument(
+        "--slurm-output",
+        default=None,
+        help="Optional sbatch output path (-o), e.g. /shared/logs/job-%%j.out.",
+    )
+    parser.add_argument(
+        "--submit-env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Extra env export passed to all submitted jobs (repeatable).",
+    )
+    parser.add_argument(
+        "--job-args",
+        action="append",
+        default=[],
+        metavar="JOB=ARG STRING",
+        help=(
+            "Override script args for a specific job (repeatable), "
+            "e.g. --job-args \"minimd=-i in.lj.miniMD -n 8000 -t 10\""
+        ),
+    )
+    parser.add_argument(
+        "--disable-rank-profiles",
+        action="store_true",
+        help="Disable module CSV rank profiles when building job env/script args.",
+    )
     parser.add_argument(
         "--target-capacity-w",
         type=float,
@@ -119,7 +153,12 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.enable_power_monitor and (not args.pdu_user or not args.pdu_password):
         parser.error("--enable-power-monitor requires --pdu-user and --pdu-password.")
-    args.job_ranks = parse_job_ranks(args.rank)
+    try:
+        args.job_ranks = parse_job_ranks(args.rank)
+        args.submit_env_map = parse_key_value_overrides(args.submit_env)
+        args.job_args_map = parse_job_args_overrides(args.job_args)
+    except ValueError as exc:
+        parser.error(str(exc))
     return args
 
 
@@ -140,6 +179,33 @@ def parse_job_ranks(rank_items: list[str]) -> dict[str, int]:
         raise ValueError("At least one --rank JOB=RANK must be provided.")
     return job_ranks
 
+
+def parse_key_value_overrides(items: list[str]) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for raw in items:
+        if "=" not in raw:
+            raise ValueError(f"Expected KEY=VALUE in --submit-env, got: {raw}")
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"Missing env key in --submit-env value: {raw}")
+        overrides[key] = value
+    return overrides
+
+
+def parse_job_args_overrides(items: list[str]) -> dict[str, list[str]]:
+    overrides: dict[str, list[str]] = {}
+    for raw in items:
+        if "=" not in raw:
+            raise ValueError(f"Expected JOB=ARG STRING in --job-args, got: {raw}")
+        job_name, args_text = raw.split("=", 1)
+        job_name = job_name.strip()
+        if not job_name:
+            raise ValueError(f"Missing job name in --job-args value: {raw}")
+        args_tokens = shlex.split(args_text.strip())
+        overrides[job_name] = args_tokens
+    return overrides
+
 def submit_jobs(scheduler: JobScheduler, args: argparse.Namespace, job_ranks: dict[str, int]) -> pd.DataFrame:
     if args.skip_submit:
         print("Skipping Slurm submission step (--skip-submit).")
@@ -154,6 +220,11 @@ def submit_jobs(scheduler: JobScheduler, args: argparse.Namespace, job_ranks: di
             time_limit=args.time_limit,
             nodelist=args.nodelist,
             exclude=args.exclude,
+            output_path=args.slurm_output,
+            mpi_iface=args.mpi_iface,
+            env_overrides=args.submit_env_map,
+            script_args_by_job=args.job_args_map,
+            use_rank_profiles=not args.disable_rank_profiles,
             dry_run=args.dry_run,
             submit_interval_s=args.submit_interval_s,
         )
@@ -166,6 +237,11 @@ def submit_jobs(scheduler: JobScheduler, args: argparse.Namespace, job_ranks: di
             time_limit=args.time_limit,
             nodelist=args.nodelist,
             exclude=args.exclude,
+            output_path=args.slurm_output,
+            mpi_iface=args.mpi_iface,
+            env_overrides=args.submit_env_map,
+            script_args_by_job=args.job_args_map,
+            use_rank_profiles=not args.disable_rank_profiles,
             dry_run=args.dry_run,
         )
 

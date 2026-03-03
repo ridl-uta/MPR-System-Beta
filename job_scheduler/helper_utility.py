@@ -6,7 +6,7 @@ import shlex
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 
 class SlurmHelperUtility:
@@ -69,6 +69,9 @@ class SlurmHelperUtility:
         time_limit: str = "00:30:00",
         nodelist: str | None = None,
         exclude: str | None = None,
+        output_path: str | None = None,
+        env_vars: Mapping[str, str] | None = None,
+        script_args: Sequence[str] | None = None,
     ) -> Tuple[List[str], int, int]:
         if ranks <= 0:
             raise ValueError(f"ranks must be > 0 for {script_path.name}")
@@ -95,11 +98,18 @@ class SlurmHelperUtility:
             "-t",
             time_limit,
         ]
+        if output_path:
+            cmd += ["-o", output_path]
         if nodelist:
             cmd += ["--nodelist", nodelist]
         if exclude:
             cmd += ["--exclude", exclude]
+        if env_vars:
+            export_tokens = [f"{key}={value}" for key, value in env_vars.items()]
+            cmd += ["--export", "ALL," + ",".join(export_tokens)]
         cmd.append(str(script_path))
+        if script_args:
+            cmd.extend(script_args)
 
         return cmd, nodes, ntasks_per_node
 

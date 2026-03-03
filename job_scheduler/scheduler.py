@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import csv
+import shlex
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 
@@ -12,9 +14,19 @@ from .performance_data import load_perf_data_for_jobs as _load_perf_data_for_job
 
 MODULE_ROOT = Path(__file__).resolve().parent
 DEFAULT_SOURCE_SCRIPTS_DIR = MODULE_ROOT / "data" / "slurm_scripts"
+DEFAULT_SOURCE_SCRIPTS_LIST = MODULE_ROOT / "data" / "slurm_scripts.txt"
 DEFAULT_PERF_DATA_XLSX = MODULE_ROOT / "data" / "all_model_data.xlsx"
 DEFAULT_PERF_SHEET_MAP: Dict[str, str] = {
     "xsbenchmpi": "xsbench",
+}
+DEFAULT_GRID_BY_JOB: Dict[str, Tuple[int, int, int]] = {
+    "hpccg": (180, 180, 180),
+    "hpcg": (64, 64, 64),
+    "minife": (240, 240, 240),
+}
+DEFAULT_BENCH_ARGS_BY_JOB: Dict[str, str] = {
+    "minimd": "-i in.lj.miniMD",
+    "comd": "-x 40 -y 40 -z 40 -N 1000",
 }
 
 
@@ -25,12 +37,19 @@ class JobScheduler:
         self,
         *,
         source_scripts_dir: Path | str | None = None,
+        source_scripts_list_path: Path | str | None = None,
         perf_xlsx_path: Path | str | None = None,
         perf_sheet_map: Dict[str, str] | None = None,
         helper_utility: SlurmHelperUtility | None = None,
     ) -> None:
         source = Path(source_scripts_dir) if source_scripts_dir is not None else DEFAULT_SOURCE_SCRIPTS_DIR
         self.source_scripts_dir = source.resolve()
+        source_list = (
+            Path(source_scripts_list_path)
+            if source_scripts_list_path is not None
+            else DEFAULT_SOURCE_SCRIPTS_LIST
+        )
+        self.source_scripts_list_path = source_list.resolve()
         perf_xlsx = Path(perf_xlsx_path) if perf_xlsx_path is not None else DEFAULT_PERF_DATA_XLSX
         self.perf_xlsx_path = perf_xlsx.resolve()
         self.perf_sheet_map: Dict[str, str] = dict(DEFAULT_PERF_SHEET_MAP)
@@ -46,6 +65,7 @@ class JobScheduler:
         if not self.source_scripts_dir.exists():
             raise FileNotFoundError(f"Slurm scripts directory not found: {self.source_scripts_dir}")
         self.scripts_dir = self.source_scripts_dir
+        self._script_list_overrides = self._load_script_list_overrides()
 
     def get_script_path(self, job_name: str) -> Path:
         return self.scripts_dir / f"run_{job_name}.slurm"
@@ -75,6 +95,143 @@ class JobScheduler:
     def _record_submission_row(self, row: Dict[str, Any]) -> None:
         self._submission_rows.append(dict(row))
 
+    @staticmethod
+    def _as_int_or_none(value: Any) -> int | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            return None
+
+    def _table_path_for_job(self, job_name: str) -> Path:
+        return self.scripts_dir / f"{job_name}.csv"
+
+    def _read_table_row_for_ranks(self, *, job_name: str, ranks: int) -> Dict[str, str]:
+        table = self._table_path_for_job(job_name)
+        if not table.exists():
+            return {}
+
+        with table.open() as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                row_ranks = self._as_int_or_none(row.get("ranks"))
+                if row_ranks != int(ranks):
+                    continue
+                clean: Dict[str, str] = {}
+                for key, value in row.items():
+                    k = str(key or "").strip()
+                    if not k:
+                        continue
+                    clean[k] = str(value or "").strip()
+                return clean
+        return {}
+
+    def _load_script_list_overrides(self) -> Dict[str, Dict[str, str]]:
+        """Parse module slurm_scripts.txt into per-job key/value overrides."""
+        path = self.source_scripts_list_path
+        if not path.exists():
+            return {}
+
+        by_job: Dict[str, Dict[str, str]] = {}
+        with path.open() as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                try:
+                    tokens = shlex.split(line)
+                except ValueError:
+                    continue
+                if not tokens:
+                    continue
+                script_token = tokens[0]
+                stem = Path(script_token).stem
+                if not stem.startswith("run_"):
+                    continue
+                job_name = stem[4:]
+                overrides: Dict[str, str] = {}
+                for token in tokens[1:]:
+                    if "=" not in token:
+                        continue
+                    key, value = token.split("=", 1)
+                    key = key.strip().lower()
+                    value = value.strip()
+                    if key and value:
+                        overrides[key] = value
+                by_job[job_name] = overrides
+        return by_job
+
+    def _script_overrides_to_env(self, job_name: str) -> Dict[str, str]:
+        overrides = self._script_list_overrides.get(job_name, {})
+        if not overrides:
+            return {}
+
+        env: Dict[str, str] = {}
+        workdir = overrides.get("workdir")
+        if workdir:
+            env["WORKDIR"] = workdir
+
+        bin_path = overrides.get("bin")
+        if bin_path:
+            if job_name == "minimd":
+                env["MINIMD_BIN"] = bin_path
+            elif job_name == "comd":
+                env["COMD_BIN"] = bin_path
+            else:
+                env["BENCH_BIN"] = bin_path
+
+        for key, value in overrides.items():
+            if key in {"workdir", "bin"}:
+                continue
+            env[key.upper()] = value
+        return env
+
+    def _rank_profile_for_job(self, *, job_name: str, ranks: int) -> tuple[Dict[str, str], List[str]]:
+        """Mirror submit_benchmark table-driven behavior using module-local CSVs."""
+        row = self._read_table_row_for_ranks(job_name=job_name, ranks=ranks)
+        env: Dict[str, str] = {}
+        script_args: List[str] = []
+
+        if job_name == "xsbenchmpi":
+            size = row.get("size") or "small"
+            lookups_val = (
+                self._as_int_or_none(row.get("lookups_per_rank"))
+                or self._as_int_or_none(row.get("lookups"))
+                or 10000
+            )
+            env["SIZE"] = str(size)
+            env["LOOKUPS"] = str(int(lookups_val))
+            return env, script_args
+
+        if job_name in DEFAULT_GRID_BY_JOB:
+            default_nx, default_ny, default_nz = DEFAULT_GRID_BY_JOB[job_name]
+            nx = self._as_int_or_none(row.get("nx")) or default_nx
+            ny = self._as_int_or_none(row.get("ny")) or default_ny
+            nz = self._as_int_or_none(row.get("nz")) or default_nz
+            env["NX"] = str(int(nx))
+            env["NY"] = str(int(ny))
+            env["NZ"] = str(int(nz))
+            return env, script_args
+
+        if job_name in DEFAULT_BENCH_ARGS_BY_JOB:
+            args_raw = (
+                row.get("args")
+                or row.get(f"{job_name}_args")
+                or row.get("bench_args")
+                or DEFAULT_BENCH_ARGS_BY_JOB[job_name]
+            )
+            try:
+                script_args = shlex.split(args_raw)
+            except ValueError:
+                script_args = shlex.split(DEFAULT_BENCH_ARGS_BY_JOB[job_name])
+            return env, script_args
+
+        return env, script_args
+
     def submit_job(
         self,
         *,
@@ -86,6 +243,11 @@ class JobScheduler:
         exclude: str | None = None,
         partition: str = "debug",
         time_limit: str = "00:30:00",
+        output_path: str | None = None,
+        mpi_iface: str | None = None,
+        env_overrides: Dict[str, str] | None = None,
+        script_args: List[str] | None = None,
+        use_rank_profiles: bool = True,
         dry_run: bool = True,
         auto_load_perf_data: bool = True,
     ) -> Dict[str, Any]:
@@ -106,6 +268,25 @@ class JobScheduler:
             self._record_submission_row(row)
             return row
 
+        profile_env: Dict[str, str] = {}
+        profile_script_args: List[str] = []
+        if use_rank_profiles:
+            profile_env, profile_script_args = self._rank_profile_for_job(
+                job_name=name,
+                ranks=int(ranks),
+            )
+
+        merged_env = self._script_overrides_to_env(name)
+        merged_env.update(profile_env)
+        if mpi_iface:
+            merged_env["MPI_IFACE"] = str(mpi_iface)
+        if env_overrides:
+            merged_env.update({str(k): str(v) for k, v in env_overrides.items()})
+
+        final_script_args: List[str] = list(profile_script_args)
+        if script_args is not None:
+            final_script_args = [str(token) for token in script_args]
+
         cmd, nodes, ntasks_per_node = self.helper.build_submit_command(
             script_path=script_path,
             ranks=int(ranks),
@@ -115,6 +296,9 @@ class JobScheduler:
             time_limit=time_limit,
             nodelist=nodelist,
             exclude=exclude,
+            output_path=output_path,
+            env_vars=merged_env or None,
+            script_args=final_script_args or None,
         )
         cmd_str = self.helper.format_command(cmd)
 
@@ -128,6 +312,8 @@ class JobScheduler:
                 "ntasks_per_node": int(ntasks_per_node),
                 "status": "DRY_RUN",
                 "command": cmd_str,
+                "env_vars": merged_env,
+                "script_args": final_script_args,
             }
             if auto_load_perf_data:
                 self._auto_load_perf_data_for_jobs([name])
@@ -148,6 +334,8 @@ class JobScheduler:
             "status": status,
             "job_id": job_id,
             "command": cmd_str,
+            "env_vars": merged_env,
+            "script_args": final_script_args,
             "stdout": proc.stdout.strip(),
             "stderr": proc.stderr.strip(),
             "returncode": proc.returncode,
@@ -169,6 +357,11 @@ class JobScheduler:
         time_limit: str = "00:30:00",
         nodelist: str | None = None,
         exclude: str | None = None,
+        output_path: str | None = None,
+        mpi_iface: str | None = None,
+        env_overrides: Dict[str, str] | None = None,
+        script_args_by_job: Dict[str, List[str]] | None = None,
+        use_rank_profiles: bool = True,
         dry_run: bool = True,
         auto_load_perf_data: bool = True,
     ) -> pd.DataFrame:
@@ -195,6 +388,11 @@ class JobScheduler:
                 exclude=exclude,
                 partition=partition,
                 time_limit=time_limit,
+                output_path=output_path,
+                mpi_iface=mpi_iface,
+                env_overrides=env_overrides,
+                script_args=(script_args_by_job or {}).get(job_name),
+                use_rank_profiles=use_rank_profiles,
                 dry_run=dry_run,
                 auto_load_perf_data=auto_load_perf_data,
             )
@@ -214,6 +412,11 @@ class JobScheduler:
         time_limit: str = "00:30:00",
         nodelist: str | None = None,
         exclude: str | None = None,
+        output_path: str | None = None,
+        mpi_iface: str | None = None,
+        env_overrides: Dict[str, str] | None = None,
+        script_args_by_job: Dict[str, List[str]] | None = None,
+        use_rank_profiles: bool = True,
         dry_run: bool = True,
         auto_load_perf_data: bool = True,
         submit_interval_s: float = 0.0,
@@ -240,6 +443,11 @@ class JobScheduler:
                 exclude=exclude,
                 partition=partition,
                 time_limit=time_limit,
+                output_path=output_path,
+                mpi_iface=mpi_iface,
+                env_overrides=env_overrides,
+                script_args=(script_args_by_job or {}).get(job_name),
+                use_rank_profiles=use_rank_profiles,
                 dry_run=dry_run,
                 auto_load_perf_data=auto_load_perf_data,
             )
