@@ -82,12 +82,6 @@ class OverloadMonitor:
 
         if self.load_shedder is not None:
             adjusted = self.load_shedder.adjust(raw_total)
-            reduction = max(0.0, raw_total - adjusted)
-            if self.load_shedder.active and reduction > 0:
-                base_low = self.ctx['T_high'] - self.ctx['min_hysteresis']
-                self.ctx['T_low'] = min(max(0.0, self.ctx['T_high'] - reduction), base_low)
-            else:
-                self.ctx['T_low'] = self.ctx['T_high'] - self.ctx['min_hysteresis']
         else:
             adjusted = raw_total
 

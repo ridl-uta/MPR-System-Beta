@@ -53,7 +53,9 @@ def make_simple_overload_ctx(
         'T_sample': sample_period_s,
         'T_high': threshold_w,
         'T_low': threshold_w - float(hysteresis_w),
+        'target_capacity_w': threshold_w,
         'min_hysteresis': float(hysteresis_w),
+        'required_reduction_w': 0.0,
         'required_high_samples': max(1, int(round(min_over_s / sample_period_s))),
         'required_low_samples': max(1, int(round(cooldown_s / sample_period_s))),
         'spike_threshold': spike_threshold,
@@ -195,6 +197,21 @@ def simple_overload_update(ctx, ts, watts):
     T_low = ctx['T_low']
     consecutive_high = ctx['consecutive_high_samples']
     state = ctx['state']
+    base_low = T_high - ctx['min_hysteresis']
+
+    if state == 'NORMAL':
+        ctx['required_reduction_w'] = 0.0
+        ctx['T_low'] = base_low
+        T_low = ctx['T_low']
+    else:
+        required_reduction = max(
+            float(ctx.get('required_reduction_w', 0.0)),
+            max(0.0, raw_sample - T_high),
+        )
+        ctx['required_reduction_w'] = required_reduction
+        dynamic_low = max(0.0, T_high - required_reduction)
+        ctx['T_low'] = min(dynamic_low, base_low)
+        T_low = ctx['T_low']
 
     if sample > T_high:
         consecutive_high += 1
@@ -202,13 +219,16 @@ def simple_overload_update(ctx, ts, watts):
         consecutive_high = 0
     ctx['consecutive_high_samples'] = consecutive_high
 
-    # Treat T_high as the top of the handled band so a controller that clamps
-    # exactly at threshold can still progress to OVERLOAD_HANDLED.
-    between = T_low <= sample <= T_high
+    # Handled band means overload is reduced below capacity but not fully ended.
+    between = T_low < sample < T_high
 
     if state == 'NORMAL':
         if consecutive_high >= ctx['required_high_samples']:
             ctx['state'] = 'OVERLOAD'
+            required_reduction = max(0.0, raw_sample - T_high)
+            ctx['required_reduction_w'] = required_reduction
+            dynamic_low = max(0.0, T_high - required_reduction)
+            ctx['T_low'] = min(dynamic_low, base_low)
             backdated_seconds = (ctx['required_high_samples'] - 1) * ctx['T_sample']
             ctx['over_start'] = ts - timedelta(seconds=backdated_seconds)
             ctx['seg_sum'] = 0.0
@@ -231,7 +251,7 @@ def simple_overload_update(ctx, ts, watts):
     if sample > ctx['seg_peak']:
         ctx['seg_peak'] = sample
 
-    if sample <= T_low:
+    if sample < T_low:
         ctx['consecutive_low_samples'] += 1
     else:
         ctx['consecutive_low_samples'] = 0
@@ -250,7 +270,7 @@ def simple_overload_update(ctx, ts, watts):
             return 'OVERLOAD_HANDLED', {'watts': sample}
 
     elif state == 'OVERLOAD_HANDLED' and handled_enabled:
-        if sample > T_high:
+        if sample >= T_high:
             ctx['state'] = 'OVERLOAD'
             ctx['consecutive_mid_samples'] = 0
         elif not between:
@@ -275,8 +295,9 @@ def simple_overload_update(ctx, ts, watts):
         ctx['consecutive_high_samples'] = 0
         ctx['consecutive_low_samples'] = 0
         ctx['consecutive_mid_samples'] = 0
+        ctx['required_reduction_w'] = 0.0
         ctx['handled_since'] = None
-        ctx['T_low'] = ctx['T_high'] - ctx['min_hysteresis']
+        ctx['T_low'] = base_low
         return ('OVERLOAD_END', info), info
 
     if ramp_event_info:

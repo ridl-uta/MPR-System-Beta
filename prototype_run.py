@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import threading
+import time
 from typing import Any
 
 import pandas as pd
@@ -40,7 +41,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--nodelist", default=None)
     parser.add_argument("--exclude", default=None)
-    parser.add_argument("--target-reduction-w", type=float, default=700.0)
+    parser.add_argument(
+        "--target-capacity-w",
+        type=float,
+        default=700.0,
+        help="Power capacity threshold. Overload watts = max(current_power - target_capacity, 0).",
+    )
+    parser.add_argument(
+        "--current-power-w",
+        type=float,
+        default=None,
+        help="Optional direct current total power reading in watts. If omitted, uses latest power-monitor sample.",
+    )
+    parser.add_argument(
+        "--power-startup-wait-s",
+        type=float,
+        default=5.0,
+        help="Seconds to wait for first power sample when --current-power-w is not provided.",
+    )
     parser.add_argument("--max-freq-mhz", type=float, default=2400.0)
     parser.add_argument(
         "--enable-power-monitor",
@@ -198,10 +216,14 @@ def fetch_job_perf_data(
     return job_perf_data
 
 
-def run_market(args: argparse.Namespace, job_perf_data: dict[str, pd.DataFrame]) -> dict[str, Any]:
+def run_market(
+    args: argparse.Namespace,
+    job_perf_data: dict[str, pd.DataFrame],
+    target_reduction_w: float,
+) -> dict[str, Any]:
     result = run_threaded_mpr_int(
         job_perf_data=job_perf_data,
-        target_reduction_w=args.target_reduction_w,
+        target_reduction_w=target_reduction_w,
         q_bounds=(0.1, 5.0),
         max_iters=100,
         delta_q_tol=0.05,
@@ -222,6 +244,41 @@ def run_market(args: argparse.Namespace, job_perf_data: dict[str, pd.DataFrame])
     print("\nMPR summary:")
     print(json.dumps(summary, indent=2))
     return result
+
+
+def resolve_target_reduction_w(
+    args: argparse.Namespace,
+    monitor: PowerMonitor | None,
+) -> tuple[float, float]:
+    if args.current_power_w is not None:
+        current_power_w = float(args.current_power_w)
+    else:
+        if monitor is None:
+            raise RuntimeError(
+                "Need current power to compute overload. Provide --current-power-w "
+                "or enable monitor with --enable-power-monitor."
+            )
+
+        sample: dict[str, object] | None = monitor.get_last_sample()
+        waited = 0.0
+        while sample is None and waited < float(args.power_startup_wait_s):
+            step = min(0.2, float(args.power_startup_wait_s) - waited)
+            if step <= 0:
+                break
+            time.sleep(step)
+            waited += step
+            sample = monitor.get_last_sample()
+
+        if sample is None:
+            raise RuntimeError(
+                "Power monitor did not produce a sample in time. "
+                "Increase --power-startup-wait-s or pass --current-power-w."
+            )
+
+        current_power_w = float(sample.get("total_watts", 0.0))
+
+    target_reduction_w = max(0.0, current_power_w - float(args.target_capacity_w))
+    return target_reduction_w, current_power_w
 
 
 def compute_frequency_targets(
@@ -397,7 +454,18 @@ def main() -> int:
         print_allocations(scheduler, args, submit_df, job_ranks)
 
         job_perf_data = fetch_job_perf_data(scheduler, job_ranks)
-        market_result = run_market(args, job_perf_data)
+        target_reduction_w, current_power_w = resolve_target_reduction_w(args, monitor)
+        print(
+            "\nCapacity check:",
+            f"current_power_w={current_power_w:.3f}",
+            f"target_capacity_w={args.target_capacity_w:.3f}",
+            f"overload_w={target_reduction_w:.3f}",
+        )
+        if target_reduction_w <= 0.0:
+            print("No overload detected (current power is within target capacity).")
+            return 0
+
+        market_result = run_market(args, job_perf_data, target_reduction_w)
         _, job_freq_mhz = compute_frequency_targets(
             market_result,
             job_perf_data,
