@@ -19,6 +19,39 @@ Show CLI help:
 python3 run_main.py --help
 ```
 
+### Foreground (blocking terminal)
+
+```bash
+python3 run_main.py \
+  --rank xsbenchmpi=2 \
+  --current-power-w 900 \
+  --target-capacity-w 700 \
+  --skip-dvfs-apply
+```
+
+### Background (non-blocking terminal)
+
+```bash
+mkdir -p output
+nohup python3 run_main.py \
+  --rank comd=1 \
+  --rank minife=2 \
+  --enable-power-monitor \
+  --pdu-user <user> \
+  --pdu-password <password> \
+  --target-capacity-w 900 \
+  > output/run_main.log 2>&1 < /dev/null &
+echo $! > output/run_main.pid
+```
+
+Useful process commands:
+
+```bash
+tail -f output/run_main.log
+ps -fp "$(cat output/run_main.pid)"
+kill "$(cat output/run_main.pid)"
+```
+
 ### 1) Dry-run Slurm submission only
 
 ```bash
@@ -28,6 +61,20 @@ python3 run_main.py \
   --current-power-w 600 \
   --target-capacity-w 700 \
   --skip-dvfs-apply
+```
+
+### 1b) Dry-run in background (non-blocking)
+
+```bash
+mkdir -p output
+nohup python3 run_main.py \
+  --dry-run \
+  --rank xsbenchmpi=2 \
+  --current-power-w 600 \
+  --target-capacity-w 700 \
+  --skip-dvfs-apply \
+  > output/run_main_dry.log 2>&1 < /dev/null &
+echo $! > output/run_main_dry.pid
 ```
 
 ### 2) Run market path (force overload)
@@ -41,6 +88,20 @@ python3 run_main.py \
   --skip-dvfs-apply
 ```
 
+### 2b) Dry-run market path in background (non-blocking)
+
+```bash
+mkdir -p output
+nohup python3 run_main.py \
+  --dry-run \
+  --rank xsbenchmpi=2 \
+  --current-power-w 900 \
+  --target-capacity-w 700 \
+  --skip-dvfs-apply \
+  > output/run_main_market_dry.log 2>&1 < /dev/null &
+echo $! > output/run_main_market_dry.pid
+```
+
 ### 3) Enable background power monitor
 
 ```bash
@@ -52,6 +113,22 @@ python3 run_main.py \
   --pdu-user <user> \
   --pdu-password <password> \
   --target-capacity-w 900
+```
+
+### 3b) Dry-run with power monitor in background (non-blocking)
+
+```bash
+mkdir -p output
+nohup python3 run_main.py \
+  --dry-run \
+  --rank comd=1 \
+  --rank minife=2 \
+  --enable-power-monitor \
+  --pdu-user <user> \
+  --pdu-password <password> \
+  --target-capacity-w 900 \
+  > output/run_main_power_dry.log 2>&1 < /dev/null &
+echo $! > output/run_main_power_dry.pid
 ```
 
 ## Job Submission Data Sources
