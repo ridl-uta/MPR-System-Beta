@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import shlex
 import subprocess
 import tempfile
@@ -55,6 +56,56 @@ class DVFSController:
         return " ".join(shlex.quote(token) for token in tokens)
 
     @staticmethod
+    def _local_host_aliases() -> set[str]:
+        aliases: set[str] = {"localhost", "127.0.0.1", "::1"}
+        for getter in (socket.gethostname, socket.getfqdn):
+            try:
+                name = getter()
+            except OSError:
+                continue
+            if not name:
+                continue
+            lowered = str(name).strip().lower()
+            if lowered:
+                aliases.add(lowered)
+                aliases.add(lowered.split(".", 1)[0])
+        return aliases
+
+    @classmethod
+    def _local_ip_set(cls) -> set[str]:
+        local_ips: set[str] = {"127.0.0.1", "::1"}
+        for host in cls._local_host_aliases():
+            try:
+                infos = socket.getaddrinfo(host, None)
+            except OSError:
+                continue
+            for info in infos:
+                sockaddr = info[4]
+                if sockaddr and len(sockaddr) > 0:
+                    local_ips.add(str(sockaddr[0]))
+        return local_ips
+
+    @classmethod
+    def _is_local_host(cls, node_name: str) -> bool:
+        candidate = str(node_name).strip().lower()
+        if not candidate:
+            return False
+        aliases = cls._local_host_aliases()
+        if candidate in aliases or candidate.split(".", 1)[0] in aliases:
+            return True
+
+        try:
+            target_infos = socket.getaddrinfo(candidate, None)
+        except OSError:
+            return False
+        local_ips = cls._local_ip_set()
+        for info in target_infos:
+            sockaddr = info[4]
+            if sockaddr and len(sockaddr) > 0 and str(sockaddr[0]) in local_ips:
+                return True
+        return False
+
+    @staticmethod
     def _normalize_cores(core_numbers: Iterable[int]) -> List[int]:
         normalized: list[int] = []
         seen: set[int] = set()
@@ -87,7 +138,14 @@ class DVFSController:
         conf_path.write_text("\n".join(lines), encoding="ascii")
         return conf_path
 
-    def _build_apply_command(self, *, hosts_file: str, conf_path: Path, dry_run: bool) -> list[str]:
+    def _build_apply_command(
+        self,
+        *,
+        hosts_file: str,
+        conf_path: Path,
+        dry_run: bool,
+        force_direct: bool = False,
+    ) -> tuple[list[str], str]:
         if not self.helper_script_path.exists():
             raise RuntimeError(f"missing helper script: {self.helper_script_path}")
 
@@ -104,13 +162,20 @@ class DVFSController:
         # Service path is default when config is written to /shared/geopm/freq.
         # For custom conf_dir or explicit direct mode, call script directly.
         use_service_default = (self.conf_dir.resolve() == self._DEFAULT_CONF_DIR.resolve()) and not self.force_direct
-        if not use_service_default:
+        use_direct = force_direct or (not use_service_default)
+        if use_direct:
             cmd.extend(["--direct", "--conf", str(conf_path)])
 
         if dry_run:
             cmd.append("--dry-run")
 
-        return cmd
+        if force_direct:
+            run_target = "local_direct_script"
+        elif use_direct:
+            run_target = "direct_script"
+        else:
+            run_target = "service_script"
+        return cmd, run_target
 
     def _run_apply_for_host(self, *, node_name: str, conf_path: Path, dry_run: bool) -> Dict[str, Any]:
         with tempfile.NamedTemporaryFile(mode="w", encoding="ascii", delete=False) as tf:
@@ -118,12 +183,18 @@ class DVFSController:
             hosts_file = tf.name
 
         try:
-            cmd = self._build_apply_command(hosts_file=hosts_file, conf_path=conf_path, dry_run=dry_run)
+            cmd, run_target = self._build_apply_command(
+                hosts_file=hosts_file,
+                conf_path=conf_path,
+                dry_run=dry_run,
+                force_direct=False,
+            )
             command_str = self._tokens_to_str(cmd)
             proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
             status = "DRY_RUN" if dry_run else ("APPLIED" if proc.returncode == 0 else "FAILED")
             return {
                 "status": status,
+                "run_target": run_target,
                 "command": command_str,
                 "returncode": int(proc.returncode),
                 "stdout": proc.stdout.strip(),
@@ -197,7 +268,7 @@ class DVFSController:
                     "control_kind": self.control_kind,
                     "config_path": str(conf_path),
                     "status": apply_result["status"],
-                    "run_target": "service_script",
+                    "run_target": apply_result["run_target"],
                     "command": apply_result["command"],
                     "returncode": apply_result["returncode"],
                     "stdout": apply_result["stdout"],
