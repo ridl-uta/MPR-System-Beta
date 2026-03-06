@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
 import shlex
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -15,7 +17,19 @@ import pandas as pd
 from dvfs import DVFSController
 from job_scheduler import JobScheduler
 from mpr_int import normalize_job_perf_data, run_threaded_mpr_int
-from power_monitor import PowerMonitor
+from power_monitor import PowerMonitor, make_simple_overload_ctx, simple_overload_update
+
+ACTIVE_JOB_STATES = {
+    "PENDING",
+    "CONFIGURING",
+    "RUNNING",
+    "COMPLETING",
+    "STAGE_OUT",
+    "SUSPENDED",
+    "RESIZING",
+    "SIGNALING",
+    "REQUEUED",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -149,6 +163,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--job-poll-interval-s",
+        type=float,
+        default=5.0,
+        help="Polling interval (seconds) for submitted Slurm job states.",
+    )
+    parser.add_argument(
+        "--job-status-print-interval-s",
+        type=float,
+        default=15.0,
+        help="Interval (seconds) for printing job-watch status lines.",
+    )
     parser.add_argument("--quiet", action="store_true", help="Disable verbose MPR logs.")
     args = parser.parse_args()
     if args.enable_power_monitor and (not args.pdu_user or not args.pdu_password):
@@ -309,7 +335,15 @@ def run_market(
         port=args.port,
         verbose=not args.quiet,
     )
+    raw_residual = float(result.get("final_residual_w", 0.0))
+    market_failed = raw_residual < 0.0
+    result["final_residual_w_raw"] = raw_residual
+    result["final_residual_w"] = max(0.0, raw_residual)
+    result["market_failed"] = bool(market_failed)
+    result["market_status"] = "FAILED" if market_failed else "OK"
+
     summary = {
+        "market_status": result["market_status"],
         "converged": result["converged"],
         "convergence_mode": result["convergence_mode"],
         "final_q": result["final_q"],
@@ -317,6 +351,9 @@ def run_market(
         "final_residual_w": result["final_residual_w"],
         "negotiation_time_s": result["negotiation_time_s"],
     }
+    if market_failed:
+        summary["failure_reason"] = "negative_residual"
+        summary["residual_shortfall_w"] = abs(raw_residual)
     print("\nMPR summary:")
     print(json.dumps(summary, indent=2))
     return result
@@ -357,6 +394,101 @@ def resolve_target_reduction_w(
     return target_reduction_w, current_power_w
 
 
+def wait_for_initial_power_sample(
+    monitor: PowerMonitor,
+    startup_wait_s: float,
+) -> dict[str, object]:
+    sample: dict[str, object] | None = monitor.get_last_sample()
+    waited = 0.0
+    timeout_s = max(0.0, float(startup_wait_s))
+    while sample is None and waited < timeout_s:
+        step = min(0.2, timeout_s - waited)
+        if step <= 0:
+            break
+        time.sleep(step)
+        waited += step
+        sample = monitor.get_last_sample()
+
+    if sample is None:
+        raise RuntimeError(
+            "Power monitor did not produce a sample in time. "
+            "Increase --power-startup-wait-s."
+        )
+    return sample
+
+
+def collect_submitted_job_ids(submit_df: pd.DataFrame) -> list[str]:
+    if submit_df.empty or "status" not in submit_df.columns or "job_id" not in submit_df.columns:
+        return []
+    rows = submit_df[submit_df["status"].astype(str) == "SUBMITTED"]
+    job_ids: list[str] = []
+    for value in rows["job_id"].tolist():
+        text = str(value).strip()
+        if not text or text.lower() in {"none", "nan"}:
+            continue
+        if text not in job_ids:
+            job_ids.append(text)
+    return job_ids
+
+
+def query_submitted_job_states(
+    scheduler: JobScheduler,
+    job_ids: list[str],
+) -> dict[str, str]:
+    if not job_ids:
+        return {}
+
+    cmd = [
+        scheduler.helper.squeue_cmd,
+        "-h",
+        "-j",
+        ",".join(job_ids),
+        "-o",
+        "%i|%T",
+    ]
+    proc = scheduler.helper.run_command(cmd)
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip() or "no details"
+        print(f"[JobWatch] squeue query failed: {stderr}")
+        return {job_id: "UNKNOWN" for job_id in job_ids}
+
+    states: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        row = line.strip()
+        if not row:
+            continue
+        parts = row.split("|", 1)
+        if len(parts) != 2:
+            continue
+        job_id = parts[0].strip()
+        state = parts[1].strip().upper()
+        if job_id:
+            states[job_id] = state
+
+    # If a submitted job no longer appears in squeue, treat it as terminal.
+    for job_id in job_ids:
+        states.setdefault(job_id, "COMPLETED")
+    return states
+
+
+def has_active_jobs(job_states: dict[str, str]) -> bool:
+    return any(str(state).upper() in ACTIVE_JOB_STATES for state in job_states.values())
+
+
+def drain_overload_events(
+    overload_event_queue: queue.Queue[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if overload_event_queue is None:
+        return []
+    events: list[dict[str, Any]] = []
+    while True:
+        try:
+            events.append(overload_event_queue.get_nowait())
+        except queue.Empty:
+            break
+    return events
+
+
 def compute_frequency_targets(
     result: dict[str, Any],
     job_perf_data: dict[str, pd.DataFrame],
@@ -395,26 +527,56 @@ def apply_dvfs(
     scheduler: JobScheduler,
     args: argparse.Namespace,
     job_freq_mhz: dict[str, float],
-) -> None:
+) -> dict[str, dict[str, Any]]:
+    return apply_dvfs_with_allocations(
+        scheduler=scheduler,
+        args=args,
+        job_freq_mhz=job_freq_mhz,
+        allocations_hint=None,
+    )
+
+
+def apply_dvfs_with_allocations(
+    *,
+    scheduler: JobScheduler,
+    args: argparse.Namespace,
+    job_freq_mhz: dict[str, float],
+    allocations_hint: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
     if args.skip_dvfs_apply:
         print("\nDVFS apply skipped (--skip-dvfs-apply).")
-        return
+        return {}
 
-    allocations = scheduler.get_submitted_job_allocations(
-        job_names=list(job_freq_mhz.keys()),
-        latest_only=True,
-    )
+    allocations: dict[str, dict[str, Any]] = dict(allocations_hint or {})
+    missing_jobs = [
+        name
+        for name in job_freq_mhz.keys()
+        if name not in allocations or not allocations[name].get("cores_by_node")
+    ]
+    if missing_jobs:
+        fetched = scheduler.get_submitted_job_allocations(
+            job_names=missing_jobs,
+            latest_only=True,
+        )
+        allocations.update(fetched)
+
     if not allocations:
         print("\nNo submitted job allocations available for DVFS apply. Skipping.")
-        return
+        return {}
 
     dvfs_controller = DVFSController(ssh_user=args.dvfs_ssh_user)
     dvfs_rows: list[dict[str, object]] = []
+    used_allocations: dict[str, dict[str, Any]] = {}
     for job_name, target_freq_mhz in job_freq_mhz.items():
         allocation = allocations.get(job_name)
         if not allocation:
             print(f"[DVFS] No allocation for job '{job_name}', skipping.")
             continue
+        cores_by_node = allocation.get("cores_by_node", {})
+        if not isinstance(cores_by_node, dict) or not cores_by_node:
+            print(f"[DVFS] No core mapping for job '{job_name}', skipping.")
+            continue
+        before_count = len(dvfs_rows)
         for row in dvfs_controller.apply_to_job_allocation(
             allocation=allocation,
             frequency_mhz=float(target_freq_mhz),
@@ -423,14 +585,24 @@ def apply_dvfs(
             row_with_job = dict(row)
             row_with_job["job"] = job_name
             dvfs_rows.append(row_with_job)
+        if len(dvfs_rows) > before_count:
+            used_allocations[job_name] = allocation
 
     if not dvfs_rows:
         print("\nDVFS apply produced no core-level actions.")
-        return
+        return used_allocations
 
     dvfs_df = pd.DataFrame(dvfs_rows)
     print("\nDVFS apply summary:")
     print(dvfs_df.to_string(index=False))
+    return used_allocations
+
+
+def parse_sample_timestamp(ts_text: str) -> datetime:
+    try:
+        return datetime.fromisoformat(str(ts_text))
+    except ValueError:
+        return datetime.now(timezone.utc)
 
 
 def build_power_monitor(args: argparse.Namespace) -> PowerMonitor | None:
@@ -450,9 +622,18 @@ def power_monitor_worker(
     monitor: PowerMonitor,
     stop_event: threading.Event,
     print_interval_s: float,
+    overload_event_queue: queue.Queue[dict[str, Any]],
+    target_capacity_w: float,
+    sample_period_s: float,
 ) -> None:
-    interval = max(0.1, float(print_interval_s))
+    print_interval = max(0.1, float(print_interval_s))
+    poll_interval = max(0.1, min(0.5, float(sample_period_s) * 0.5))
+    next_print_at = 0.0
     last_sample_ts: str | None = None
+    overload_ctx = make_simple_overload_ctx(
+        sample_period_s=max(0.1, float(sample_period_s)),
+        threshold_w=float(target_capacity_w),
+    )
 
     while not stop_event.is_set():
         events = monitor.consume_events()
@@ -467,27 +648,69 @@ def power_monitor_worker(
             if ts and ts != last_sample_ts:
                 total_watts = float(sample.get("total_watts", 0.0))
                 node_totals = sample.get("node_totals", {})
-                print(
-                    f"[PowerSample] ts={ts} total_watts={total_watts:.1f} "
-                    f"nodes={node_totals}"
-                )
+                ts_dt = parse_sample_timestamp(ts)
+                overload_ctx["last_raw_sample"] = total_watts
+                event, payload = simple_overload_update(overload_ctx, ts_dt, total_watts)
+                if event:
+                    event_name = str(event[0]) if isinstance(event, tuple) else str(event)
+                    reduction_w = float(
+                        overload_ctx.get(
+                            "required_reduction_w",
+                            max(0.0, total_watts - float(target_capacity_w)),
+                        )
+                    )
+                    overload_record: dict[str, Any] = {
+                        "timestamp": ts,
+                        "event": event_name,
+                        "payload": payload if isinstance(payload, dict) else {},
+                        "total_watts": total_watts,
+                        "target_capacity_w": float(target_capacity_w),
+                        "required_reduction_w": max(0.0, reduction_w),
+                        "state": str(overload_ctx.get("state", "")),
+                    }
+                    overload_event_queue.put(overload_record)
+                    print(
+                        f"[OverloadEvent] {event_name} "
+                        f"total_watts={total_watts:.1f} "
+                        f"required_reduction_w={overload_record['required_reduction_w']:.3f}"
+                    )
+                now = time.monotonic()
+                if now >= next_print_at:
+                    print(
+                        f"[PowerSample] ts={ts} total_watts={total_watts:.1f} "
+                        f"nodes={node_totals}"
+                    )
+                    next_print_at = now + print_interval
                 last_sample_ts = ts
 
-        stop_event.wait(interval)
+        stop_event.wait(poll_interval)
 
 
 def start_power_monitor(
     args: argparse.Namespace,
-) -> tuple[PowerMonitor | None, threading.Event | None, threading.Thread | None]:
+) -> tuple[
+    PowerMonitor | None,
+    threading.Event | None,
+    threading.Thread | None,
+    queue.Queue[dict[str, Any]] | None,
+]:
     monitor = build_power_monitor(args)
     if monitor is None:
-        return None, None, None
+        return None, None, None, None
 
     monitor.start()
     stop_event = threading.Event()
+    overload_event_queue: queue.Queue[dict[str, Any]] = queue.Queue()
     worker = threading.Thread(
         target=power_monitor_worker,
-        args=(monitor, stop_event, args.power_print_interval_s),
+        args=(
+            monitor,
+            stop_event,
+            args.power_print_interval_s,
+            overload_event_queue,
+            args.target_capacity_w,
+            args.power_interval_s,
+        ),
         daemon=True,
         name="PowerMonitorEvents",
     )
@@ -498,7 +721,7 @@ def start_power_monitor(
         f"mapping={monitor.resolved_mapping_path}",
         f"csv={args.pdu_csv}",
     )
-    return monitor, stop_event, worker
+    return monitor, stop_event, worker, overload_event_queue
 
 
 def stop_power_monitor(
@@ -514,11 +737,177 @@ def stop_power_monitor(
         monitor.stop()
 
 
+def apply_overload_reduction(
+    *,
+    args: argparse.Namespace,
+    scheduler: JobScheduler,
+    job_perf_data: dict[str, pd.DataFrame],
+    current_power_w: float,
+    allocations_cache: dict[str, dict[str, Any]],
+) -> tuple[bool, dict[str, dict[str, Any]]]:
+    target_reduction_w = max(0.0, float(current_power_w) - float(args.target_capacity_w))
+    print(
+        "\nCapacity check:",
+        f"current_power_w={current_power_w:.3f}",
+        f"target_capacity_w={args.target_capacity_w:.3f}",
+        f"overload_w={target_reduction_w:.3f}",
+    )
+    if target_reduction_w <= 0.0:
+        print("No overload detected (current power is within target capacity).")
+        return False, allocations_cache
+
+    market_result = run_market(args, job_perf_data, target_reduction_w)
+    if bool(market_result.get("market_failed")):
+        print(
+            "[Control] Market failed: negative residual indicates target reduction "
+            "was not met. Skipping DVFS reduction apply."
+        )
+        return False, allocations_cache
+    _, job_freq_mhz = compute_frequency_targets(
+        market_result,
+        job_perf_data,
+        max_freq_mhz=args.max_freq_mhz,
+    )
+    used = apply_dvfs_with_allocations(
+        scheduler=scheduler,
+        args=args,
+        job_freq_mhz=job_freq_mhz,
+        allocations_hint=allocations_cache,
+    )
+    allocations_cache.update(used)
+    return True, allocations_cache
+
+
+def apply_reset_to_max_frequency(
+    *,
+    scheduler: JobScheduler,
+    args: argparse.Namespace,
+    job_names: list[str],
+    allocations_cache: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    reset_map = {name: float(args.max_freq_mhz) for name in job_names}
+    print(f"\nResetting DVFS to max frequency ({args.max_freq_mhz:.3f} MHz) after overload end.")
+    used = apply_dvfs_with_allocations(
+        scheduler=scheduler,
+        args=args,
+        job_freq_mhz=reset_map,
+        allocations_hint=allocations_cache,
+    )
+    allocations_cache.update(used)
+    return allocations_cache
+
+
+def run_event_driven_control_loop(
+    *,
+    scheduler: JobScheduler,
+    args: argparse.Namespace,
+    monitor: PowerMonitor,
+    overload_event_queue: queue.Queue[dict[str, Any]],
+    submit_df: pd.DataFrame,
+    job_ranks: dict[str, int],
+    job_perf_data: dict[str, pd.DataFrame],
+) -> None:
+    submitted_job_ids = collect_submitted_job_ids(submit_df)
+    if not submitted_job_ids:
+        print("No submitted job IDs found. Event-driven loop not started.")
+        return
+
+    startup_sample = wait_for_initial_power_sample(monitor, float(args.power_startup_wait_s))
+    startup_power = float(startup_sample.get("total_watts", 0.0))
+    startup_overload = max(0.0, startup_power - float(args.target_capacity_w))
+    print(
+        "\nCapacity check:",
+        f"current_power_w={startup_power:.3f}",
+        f"target_capacity_w={args.target_capacity_w:.3f}",
+        f"overload_w={startup_overload:.3f}",
+    )
+    if startup_overload <= 0.0:
+        print("No overload detected at startup; waiting for overload events.")
+
+    loop_interval_s = max(0.2, min(1.0, float(args.power_interval_s)))
+    job_poll_interval_s = max(1.0, float(args.job_poll_interval_s))
+    job_print_interval_s = max(1.0, float(args.job_status_print_interval_s))
+    next_job_poll = 0.0
+    next_job_print = 0.0
+    job_states: dict[str, str] = {}
+
+    reduction_active = False
+    reset_applied = True
+    allocations_cache: dict[str, dict[str, Any]] = {}
+
+    while True:
+        now = time.monotonic()
+        if now >= next_job_poll:
+            job_states = query_submitted_job_states(scheduler, submitted_job_ids)
+            next_job_poll = now + job_poll_interval_s
+
+        if now >= next_job_print:
+            state_parts = [f"{job_id}:{job_states.get(job_id, 'UNKNOWN')}" for job_id in submitted_job_ids]
+            print(f"[JobWatch] active={has_active_jobs(job_states)} states={state_parts}")
+            next_job_print = now + job_print_interval_s
+
+        for event in drain_overload_events(overload_event_queue):
+            event_name = str(event.get("event", ""))
+            ts = str(event.get("timestamp", ""))
+            total_watts = float(event.get("total_watts", 0.0))
+            required_w = float(
+                event.get(
+                    "required_reduction_w",
+                    max(0.0, total_watts - float(args.target_capacity_w)),
+                )
+            )
+            print(
+                f"[Control] event={event_name} ts={ts} "
+                f"total_watts={total_watts:.3f} required_reduction_w={required_w:.3f}"
+            )
+
+            if event_name == "OVERLOAD_START":
+                reduction_applied, allocations_cache = apply_overload_reduction(
+                    args=args,
+                    scheduler=scheduler,
+                    job_perf_data=job_perf_data,
+                    current_power_w=total_watts,
+                    allocations_cache=allocations_cache,
+                )
+                if reduction_applied:
+                    reduction_active = True
+                    reset_applied = False
+            elif event_name == "OVERLOAD_END":
+                if reduction_active and not reset_applied:
+                    allocations_cache = apply_reset_to_max_frequency(
+                        scheduler=scheduler,
+                        args=args,
+                        job_names=list(job_ranks.keys()),
+                        allocations_cache=allocations_cache,
+                    )
+                    reduction_active = False
+                    reset_applied = True
+            elif event_name == "OVERLOAD_HANDLED":
+                print("[Control] overload handled band reached.")
+
+        jobs_active = has_active_jobs(job_states)
+        if not jobs_active:
+            if reduction_active and not reset_applied:
+                print("[Control] Jobs ended while reduction active; applying safety DVFS reset.")
+                allocations_cache = apply_reset_to_max_frequency(
+                    scheduler=scheduler,
+                    args=args,
+                    job_names=list(job_ranks.keys()),
+                    allocations_cache=allocations_cache,
+                )
+                reduction_active = False
+                reset_applied = True
+            print("All submitted jobs completed. Exiting event-driven control loop.")
+            break
+
+        time.sleep(loop_interval_s)
+
+
 def main() -> int:
     args = parse_args()
     scheduler = JobScheduler()
     job_ranks = args.job_ranks
-    monitor, monitor_stop_event, monitor_worker = start_power_monitor(args)
+    monitor, monitor_stop_event, monitor_worker, overload_event_queue = start_power_monitor(args)
 
     try:
         print("Source Slurm scripts:", scheduler.source_scripts_dir)
@@ -530,24 +919,40 @@ def main() -> int:
         print_allocations(scheduler, args, submit_df, job_ranks)
 
         job_perf_data = fetch_job_perf_data(scheduler, job_ranks)
-        target_reduction_w, current_power_w = resolve_target_reduction_w(args, monitor)
-        print(
-            "\nCapacity check:",
-            f"current_power_w={current_power_w:.3f}",
-            f"target_capacity_w={args.target_capacity_w:.3f}",
-            f"overload_w={target_reduction_w:.3f}",
-        )
-        if target_reduction_w <= 0.0:
-            print("No overload detected (current power is within target capacity).")
-            return 0
-
-        market_result = run_market(args, job_perf_data, target_reduction_w)
-        _, job_freq_mhz = compute_frequency_targets(
-            market_result,
-            job_perf_data,
-            max_freq_mhz=args.max_freq_mhz,
-        )
-        apply_dvfs(scheduler, args, job_freq_mhz)
+        if monitor is not None and overload_event_queue is not None:
+            run_event_driven_control_loop(
+                scheduler=scheduler,
+                args=args,
+                monitor=monitor,
+                overload_event_queue=overload_event_queue,
+                submit_df=submit_df,
+                job_ranks=job_ranks,
+                job_perf_data=job_perf_data,
+            )
+        else:
+            target_reduction_w, current_power_w = resolve_target_reduction_w(args, monitor)
+            print(
+                "\nCapacity check:",
+                f"current_power_w={current_power_w:.3f}",
+                f"target_capacity_w={args.target_capacity_w:.3f}",
+                f"overload_w={target_reduction_w:.3f}",
+            )
+            if target_reduction_w > 0.0:
+                market_result = run_market(args, job_perf_data, target_reduction_w)
+                if bool(market_result.get("market_failed")):
+                    print(
+                        "Market failed: negative residual indicates target reduction "
+                        "was not met. Skipping DVFS reduction apply."
+                    )
+                else:
+                    _, job_freq_mhz = compute_frequency_targets(
+                        market_result,
+                        job_perf_data,
+                        max_freq_mhz=args.max_freq_mhz,
+                    )
+                    apply_dvfs(scheduler, args, job_freq_mhz)
+            else:
+                print("No overload detected (current power is within target capacity).")
     finally:
         stop_power_monitor(monitor, monitor_stop_event, monitor_worker)
     return 0
