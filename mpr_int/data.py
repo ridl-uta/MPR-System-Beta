@@ -82,7 +82,7 @@ def maximize_net_gain_with_data_brute(
     q: float,
     delta_max: float,
     resolution: int = 500,
-    min_skip_idx: int = 5,
+    min_skip_idx: int = 0,
 ) -> float:
     b_hi = max(q * delta_max, 1e-6)
     b_vals = np.linspace(1e-6, b_hi, resolution)
@@ -93,10 +93,21 @@ def maximize_net_gain_with_data_brute(
     cost = np.divide(l_x, x_scaled, out=np.zeros_like(l_x), where=x_scaled > 1e-6)
     gains = q * x - cost
 
-    grad = np.gradient(gains)
-    pos = np.where(grad[min_skip_idx:] > 0)[0]
-    start = int(min_skip_idx + pos[0]) if pos.size else int(min_skip_idx)
-    best_idx = int(start + np.argmax(gains[start:]))
+    finite_idx = np.flatnonzero(np.isfinite(gains))
+    if finite_idx.size == 0:
+        return float(b_hi)
+
+    if min_skip_idx > 0:
+        tail_idx = finite_idx[finite_idx >= int(min_skip_idx)]
+        if tail_idx.size > 0:
+            finite_idx = tail_idx
+
+    finite_gains = gains[finite_idx]
+    best_gain = float(np.max(finite_gains))
+    eps = 1e-9
+    # Prefer larger reduction (x) among near-equal gain candidates.
+    best_candidates = finite_idx[finite_gains >= best_gain - eps]
+    best_idx = int(best_candidates[np.argmax(x[best_candidates])])
     return float(b_vals[best_idx])
 
 

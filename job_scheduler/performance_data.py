@@ -6,6 +6,7 @@ import pandas as pd
 
 
 REQUIRED_PERF_COLUMNS = ["Resource Reduction", "Extra Execution", "Power"]
+OPTIONAL_FREQ_COLUMN_NAMES = {"frequencies", "frequency", "freq", "frequency_mhz"}
 
 
 def load_perf_data_for_jobs(
@@ -14,7 +15,7 @@ def load_perf_data_for_jobs(
     job_names: list[str],
     sheet_map: dict[str, str],
 ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
-    """Load workbook data and keep only columns required by MPR."""
+    """Load workbook data and keep required MPR columns plus optional frequency columns."""
     if not xlsx_path.exists():
         raise FileNotFoundError(f"Workbook not found: {xlsx_path}")
 
@@ -43,7 +44,15 @@ def load_perf_data_for_jobs(
             )
             continue
 
-        model_df = raw[REQUIRED_PERF_COLUMNS].dropna().reset_index(drop=True)
+        optional_cols = [
+            str(column)
+            for column in raw.columns
+            if str(column).strip().lower() in OPTIONAL_FREQ_COLUMN_NAMES
+        ]
+        selected_cols = REQUIRED_PERF_COLUMNS + [
+            column for column in optional_cols if column not in REQUIRED_PERF_COLUMNS
+        ]
+        model_df = raw[selected_cols].dropna(subset=REQUIRED_PERF_COLUMNS).reset_index(drop=True)
         if model_df.empty:
             audit_rows.append({"job": job_name, "sheet": sheet, "status": "EMPTY_AFTER_CLEAN"})
             continue

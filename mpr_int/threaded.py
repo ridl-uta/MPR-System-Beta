@@ -34,6 +34,8 @@ class ThreadedMPRIntNegotiator:
         reconnect_wait_s: float = 120.0,
         startup_timeout_s: float = 20.0,
         client_start_delay_s: float = 0.05,
+        recompute_final_bids: bool = True,
+        enable_feasible_fallback: bool = True,
         host: str = "127.0.0.1",
         port: int = 8765,
         log_http_requests: bool = False,
@@ -60,6 +62,8 @@ class ThreadedMPRIntNegotiator:
         self.cycle_pick = cycle_pick
         self.startup_timeout_s = float(startup_timeout_s)
         self.client_start_delay_s = float(client_start_delay_s)
+        self.recompute_final_bids = bool(recompute_final_bids)
+        self.enable_feasible_fallback = bool(enable_feasible_fallback)
         self.verbose = bool(verbose)
 
         self.server = MPRServer(
@@ -87,6 +91,87 @@ class ThreadedMPRIntNegotiator:
     def _log(self, message: str) -> None:
         if self.verbose:
             print(message)
+
+    def _evaluate_self_consistent_point(self, q_value: float) -> tuple[dict[str, float], float]:
+        q = float(np.clip(q_value, self.q_bounds[0], self.q_bounds[1]))
+        bids = self.server.request_bids(q, self.client_ids)
+        reduction = float(self.server.query_total_reduction(q, bids, self.client_ids))
+        return bids, reduction
+
+    def _find_min_feasible_self_consistent_point(
+        self,
+        *,
+        search_iters: int = 24,
+    ) -> tuple[float, dict[str, float], float] | None:
+        q_low, q_high = self.q_bounds
+        target = self.target_effective_w
+        cache: Dict[float, tuple[dict[str, float], float]] = {}
+
+        def evaluate(q_value: float) -> tuple[dict[str, float], float]:
+            q_key = round(float(q_value), 8)
+            cached = cache.get(q_key)
+            if cached is not None:
+                return cached
+            point = self._evaluate_self_consistent_point(float(q_value))
+            cache[q_key] = point
+            return point
+
+        low_bids, low_reduction = evaluate(q_low)
+        if low_reduction >= target:
+            return float(q_low), low_bids, low_reduction
+
+        high_bids, high_reduction = evaluate(q_high)
+        if high_reduction < target:
+            return None
+
+        lo = float(q_low)
+        hi = float(q_high)
+        hi_bids = high_bids
+        hi_reduction = high_reduction
+
+        for _ in range(max(1, int(search_iters))):
+            mid = (lo + hi) / 2.0
+            mid_bids, mid_reduction = evaluate(mid)
+            if mid_reduction >= target:
+                hi = mid
+                hi_bids = mid_bids
+                hi_reduction = mid_reduction
+            else:
+                lo = mid
+
+        # Build a small candidate set around the feasible boundary and pick the
+        # feasible point with minimum residual; tie-break on smaller q.
+        candidate_qs = {
+            round(float(hi), 8),
+            round(float(q_low), 8),
+            round(float(q_high), 8),
+        }
+        span = max(1e-6, hi - lo)
+        for i in range(max(2, int(search_iters)) + 1):
+            frac = i / max(2, int(search_iters))
+            q_sample = lo + frac * span
+            candidate_qs.add(round(float(q_sample), 8))
+
+        best: tuple[float, dict[str, float], float] | None = None
+        best_residual = float("inf")
+        for q_candidate in sorted(candidate_qs):
+            bids_candidate, reduction_candidate = evaluate(float(q_candidate))
+            residual_candidate = float(reduction_candidate - target)
+            if residual_candidate < 0.0:
+                continue
+            if (
+                residual_candidate < best_residual
+                or (
+                    abs(residual_candidate - best_residual) <= 1e-9
+                    and best is not None
+                    and float(q_candidate) < best[0]
+                )
+                or best is None
+            ):
+                best_residual = residual_candidate
+                best = (float(q_candidate), bids_candidate, float(reduction_candidate))
+
+        return best
 
     def _run_negotiation(self) -> Dict[str, Any]:
         t0 = time.perf_counter()
@@ -171,9 +256,36 @@ class ThreadedMPRIntNegotiator:
             selected_index = len(q_clear_history) - 1
 
         final_q = float(q_clear_history[selected_index])
-        final_bids = dict(bids_history[selected_index])
-        final_reduction = float(self.server.query_total_reduction(final_q, final_bids, self.client_ids))
-        final_residual = float(final_reduction - self.target_effective_w)
+        selected_q_current = float(q_current_history[selected_index])
+        selected_bids = dict(bids_history[selected_index])
+
+        # By default, recompute bids at final_q so final reductions/frequencies
+        # are evaluated with a self-consistent (q, bids) pair. This can be
+        # disabled to preserve history-selected (q_clear, bids_at_q_current)
+        # behavior used in step-by-step tracing.
+        feasible_fallback_used = False
+        if self.recompute_final_bids:
+            final_bids = self.server.request_bids(final_q, self.client_ids)
+            final_reduction = float(self.server.query_total_reduction(final_q, final_bids, self.client_ids))
+            final_residual = float(final_reduction - self.target_effective_w)
+            if self.enable_feasible_fallback and final_residual < 0.0:
+                fallback_point = self._find_min_feasible_self_consistent_point()
+                if fallback_point is not None:
+                    final_q, final_bids, final_reduction = fallback_point
+                    final_residual = float(final_reduction - self.target_effective_w)
+                    feasible_fallback_used = True
+                    convergence_mode = (
+                        f"{convergence_mode}+feasible_fallback"
+                        if convergence_mode
+                        else "feasible_fallback"
+                    )
+        else:
+            # Match step-by-step history selection exactly:
+            # bids are those observed at q_current for selected iteration and
+            # residual comes from clearing at selected q_clear with those bids.
+            final_bids = dict(selected_bids)
+            final_residual = float(residual_history[selected_index])
+            final_reduction = float(self.target_effective_w + final_residual)
         negotiation_time_s = float(time.perf_counter() - t0)
 
         return {
@@ -188,6 +300,9 @@ class ThreadedMPRIntNegotiator:
             "cycle_period": cycle_period,
             "cycle_max_diff": cycle_max_diff,
             "selected_iteration": int(selected_index + 1),
+            "selected_q_current": selected_q_current,
+            "selected_bids": selected_bids,
+            "feasible_fallback_used": feasible_fallback_used,
             "iterations_run": int(len(q_clear_history)),
             "negotiation_time_s": negotiation_time_s,
             "history": {

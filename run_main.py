@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from dvfs import DVFSController
@@ -331,6 +332,8 @@ def run_market(
         delta_q_tol=0.05,
         residual_abs_tol=5.0,
         cycle_q_tol=0.05,
+        recompute_final_bids=False,
+        enable_feasible_fallback=False,
         host=args.host,
         port=args.port,
         verbose=not args.quiet,
@@ -496,15 +499,45 @@ def compute_frequency_targets(
 ) -> tuple[pd.DataFrame, dict[str, float]]:
     models = normalize_job_perf_data(job_perf_data)
     delta_max_by_job = {model.client_id: float(model.delta_max) for model in models}
+    model_by_job = {model.client_id: model for model in models}
     q_final = float(result["final_q"])
 
     job_reduction: dict[str, float] = {}
     job_freq_mhz: dict[str, float] = {}
+    job_power_saved_w: dict[str, float] = {}
     for client_id, bid in dict(result["final_bids"]).items():
         delta = max(delta_max_by_job[client_id] - float(bid) / q_final, 0.0)
         delta = min(delta, 1.0)
         job_reduction[client_id] = delta
-        job_freq_mhz[client_id] = max_freq_mhz * (1.0 - delta)
+        # Prefer workbook-provided frequency model when available.
+        freq_mhz: float | None = None
+        raw_df = job_perf_data.get(client_id)
+        if raw_df is not None and "Resource Reduction" in raw_df.columns:
+            freq_col: str | None = None
+            for candidate in raw_df.columns:
+                name = str(candidate).strip().lower()
+                if name in {"frequencies", "frequency", "freq", "frequency_mhz"}:
+                    freq_col = str(candidate)
+                    break
+            if freq_col is not None:
+                rr_vals = pd.to_numeric(raw_df["Resource Reduction"], errors="coerce").to_numpy(dtype=float)
+                freq_vals = pd.to_numeric(raw_df[freq_col], errors="coerce").to_numpy(dtype=float)
+                valid = np.isfinite(rr_vals) & np.isfinite(freq_vals)
+                rr_vals = rr_vals[valid]
+                freq_vals = freq_vals[valid]
+                if rr_vals.size > 0:
+                    order = np.argsort(rr_vals)
+                    rr_vals = rr_vals[order]
+                    freq_vals = freq_vals[order]
+                    freq_mhz = float(np.interp(delta, rr_vals, freq_vals))
+
+        if freq_mhz is None:
+            freq_mhz = max_freq_mhz * (1.0 - delta)
+
+        job_freq_mhz[client_id] = freq_mhz
+        model = model_by_job[client_id]
+        power_at_delta = float(np.interp(delta, model.rr, model.pw))
+        job_power_saved_w[client_id] = float(model.power_max - power_at_delta)
 
     freq_df = (
         pd.DataFrame(
@@ -513,6 +546,7 @@ def compute_frequency_targets(
                 "reduction_fraction": [job_reduction[key] for key in job_freq_mhz.keys()],
                 "target_freq_mhz": [job_freq_mhz[key] for key in job_freq_mhz.keys()],
                 "target_freq_ghz": [job_freq_mhz[key] / 1000.0 for key in job_freq_mhz.keys()],
+                "power_saved_w": [job_power_saved_w[key] for key in job_freq_mhz.keys()],
             }
         )
         .sort_values("job")

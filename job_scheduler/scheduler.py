@@ -15,7 +15,7 @@ from .performance_data import load_perf_data_for_jobs as _load_perf_data_for_job
 MODULE_ROOT = Path(__file__).resolve().parent
 DEFAULT_SOURCE_SCRIPTS_DIR = MODULE_ROOT / "data" / "slurm_scripts"
 DEFAULT_SOURCE_SCRIPTS_LIST = MODULE_ROOT / "data" / "slurm_scripts.txt"
-DEFAULT_PERF_DATA_XLSX = MODULE_ROOT / "data" / "all_model_data.xlsx"
+DEFAULT_PERF_DATA_XLSX = MODULE_ROOT / "data" / "all_model_data_by_rank.xlsx"
 DEFAULT_PERF_SHEET_MAP: Dict[str, str] = {
     "xsbenchmpi": "xsbench",
 }
