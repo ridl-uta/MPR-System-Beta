@@ -159,7 +159,7 @@ class MainController:
                         logging.warning("[Dry-Run] Failed to execute preview: %s", exc)
                 return
 
-            interval_mhz = 200
+            interval_mhz = 100
             max_freq_mhz = int(round(self.dvfs_manager.max_freq_mhz))
             min_freq_mhz = int(round(self.dvfs_manager.min_freq_mhz))
             if max_freq_mhz <= 0 or min_freq_mhz <= 0 or max_freq_mhz < min_freq_mhz:
