@@ -50,6 +50,7 @@ class MainController:
         record_nodelist: Optional[str] = None,
         record_exclude: Optional[str] = None,
         record_dry_run: bool = False,
+        record_interval_mhz: int = 100,
     ) -> None:
         self._stop = threading.Event()
         self.power_monitor = power_monitor or PowerMonitor()
@@ -64,6 +65,7 @@ class MainController:
         self.record_nodelist = record_nodelist
         self.record_exclude = record_exclude
         self.record_dry_run = record_dry_run
+        self.record_interval_mhz = max(1, int(record_interval_mhz))
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -159,7 +161,7 @@ class MainController:
                         logging.warning("[Dry-Run] Failed to execute preview: %s", exc)
                 return
 
-            interval_mhz = 100
+            interval_mhz = self.record_interval_mhz
             max_freq_mhz = int(round(self.dvfs_manager.max_freq_mhz))
             min_freq_mhz = int(round(self.dvfs_manager.min_freq_mhz))
             if max_freq_mhz <= 0 or min_freq_mhz <= 0 or max_freq_mhz < min_freq_mhz:
@@ -861,6 +863,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Do not submit jobs; log the generated submission commands and params",
     )
     parser.add_argument(
+        "--record-interval-mhz",
+        type=int,
+        default=100,
+        help="Frequency step (MHz) for record_performance DVFS sweeps",
+    )
+    parser.add_argument(
         "--shed-watts",
         type=float,
         default=0.0,
@@ -993,6 +1001,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         record_nodelist=args.record_nodelist,
         record_exclude=args.record_exclude,
         record_dry_run=args.record_dry_run,
+        record_interval_mhz=args.record_interval_mhz,
     )
 
     _install_signal_handlers(controller)
