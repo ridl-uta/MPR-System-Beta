@@ -1128,10 +1128,24 @@ def run_event_driven_control_loop(
             elapsed_after_jobs = now_done - jobs_completed_since
             if elapsed_after_jobs >= post_jobs_monitor_s:
                 if reduction_active and not reset_applied:
-                    print(
-                        "[Control] Post-job monitor window ended before OVERLOAD_END; "
-                        "leaving frequencies unchanged (no automatic reset)."
-                    )
+                    if not control_actions_enabled:
+                        print(
+                            "[Control] Post-job monitor window ended before OVERLOAD_END; "
+                            "detect-overload-only mode keeps frequencies unchanged."
+                        )
+                    else:
+                        print(
+                            "[Control] Post-job monitor window ended before OVERLOAD_END; "
+                            "applying safety DVFS reset to max frequency."
+                        )
+                        allocations_cache = apply_reset_to_max_frequency(
+                            scheduler=scheduler,
+                            args=args,
+                            job_names=list(job_ranks.keys()),
+                            allocations_cache=allocations_cache,
+                        )
+                        reduction_active = False
+                        reset_applied = True
                 print("Post-job monitoring window ended. Exiting event-driven control loop.")
                 break
 

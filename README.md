@@ -41,8 +41,8 @@ Execution is controlled by a few independent switches:
 - keeps monitor/event loop alive after jobs complete so late `OVERLOAD_END` can still fire
 
 Important behavior:
-- DVFS reset to max frequency is tied to `OVERLOAD_END`.
-- There is no automatic reset just because jobs completed.
+- DVFS reset to max frequency is applied on `OVERLOAD_END`.
+- If `OVERLOAD_END` does not arrive before `--post-jobs-monitor-s` expires, a safety reset to max frequency is applied before exit (except `--detect-overload-only` mode).
 
 ## Command Templates (All Common Variations)
 
