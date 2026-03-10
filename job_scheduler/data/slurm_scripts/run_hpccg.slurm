@@ -9,7 +9,7 @@ set -euo pipefail
 
 # Allow caller to override working directory; default to HPCCG source tree.
 WORKDIR=${WORKDIR:-/shared/src/HPCCG}
-HPCCG_BIN=${HPCCG_BIN:-./test_HPCCG_mpi}
+HPCCG_BIN=${HPCCG_BIN:-./test_HPCCG}
 
 # Transport layer provider for libfabric-based MPI; sockets is the safe default.
 export FI_PROVIDER=${FI_PROVIDER:-sockets}
