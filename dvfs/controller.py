@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import socket
 import shlex
 import subprocess
@@ -12,6 +13,7 @@ class DVFSController:
     """Apply DVFS using run_geopm_apply_ssh.sh + per-host config files."""
 
     _DEFAULT_CONF_DIR = Path("/shared/geopm/freq")
+    _CPU_READBACK_RE = re.compile(r"^cpu\d+:\s*([0-9]+(?:\.[0-9]+)?)\s*MHz$", flags=re.IGNORECASE)
 
     def __init__(
         self,
@@ -25,6 +27,7 @@ class DVFSController:
         force_direct: bool = False,
         insecure_ssh: bool = False,
         concurrency: int = 8,
+        verify_tolerance_mhz: float = 25.0,
     ) -> None:
         self.helper_script_path = (
             Path(helper_script_path).resolve()
@@ -39,11 +42,14 @@ class DVFSController:
         self.force_direct = bool(force_direct)
         self.insecure_ssh = bool(insecure_ssh)
         self.concurrency = int(concurrency)
+        self.verify_tolerance_mhz = float(verify_tolerance_mhz)
 
         if self.control_kind not in {"AUTO", "CORE_MAX", "CPU"}:
             raise ValueError("control_kind must be one of: AUTO, CORE_MAX, CPU")
         if self.concurrency <= 0:
             raise ValueError("concurrency must be > 0")
+        if self.verify_tolerance_mhz < 0:
+            raise ValueError("verify_tolerance_mhz must be >= 0")
 
     @staticmethod
     def _mhz_to_hz(freq_mhz: float) -> int:
@@ -203,6 +209,75 @@ class DVFSController:
         finally:
             Path(hosts_file).unlink(missing_ok=True)
 
+    @classmethod
+    def _extract_readback_mhz(cls, stdout: str) -> List[float]:
+        values: list[float] = []
+        for line in str(stdout).splitlines():
+            match = cls._CPU_READBACK_RE.match(line.strip())
+            if not match:
+                continue
+            try:
+                values.append(float(match.group(1)))
+            except ValueError:
+                continue
+        return values
+
+    def _build_verification_fields(
+        self,
+        *,
+        requested_mhz: float,
+        status: str,
+        returncode: int,
+        stdout: str,
+    ) -> Dict[str, Any]:
+        fields: dict[str, Any] = {
+            "verify_tolerance_mhz": float(self.verify_tolerance_mhz),
+            "readback_samples": 0,
+            "readback_min_mhz": None,
+            "readback_max_mhz": None,
+            "readback_avg_mhz": None,
+            "readback_error_mhz": None,
+            "readback_abs_error_mhz": None,
+            "verify_status": "NO_READBACK",
+            "verify_reason": "no_readback_values",
+        }
+
+        if status == "DRY_RUN":
+            fields["verify_status"] = "SKIP_DRY_RUN"
+            fields["verify_reason"] = "dry_run"
+            return fields
+
+        if int(returncode) != 0:
+            fields["verify_status"] = "FAIL"
+            fields["verify_reason"] = "apply_command_failed"
+            return fields
+
+        readback_values = self._extract_readback_mhz(stdout)
+        if not readback_values:
+            fields["verify_status"] = "NO_READBACK"
+            fields["verify_reason"] = "no_cpu_readback_lines"
+            return fields
+
+        readback_min = min(readback_values)
+        readback_max = max(readback_values)
+        readback_avg = sum(readback_values) / float(len(readback_values))
+        readback_error = readback_avg - float(requested_mhz)
+        readback_abs_error = abs(readback_error)
+        is_pass = readback_abs_error <= float(self.verify_tolerance_mhz)
+        fields.update(
+            {
+                "readback_samples": int(len(readback_values)),
+                "readback_min_mhz": float(readback_min),
+                "readback_max_mhz": float(readback_max),
+                "readback_avg_mhz": float(readback_avg),
+                "readback_error_mhz": float(readback_error),
+                "readback_abs_error_mhz": float(readback_abs_error),
+                "verify_status": "PASS" if is_pass else "FAIL",
+                "verify_reason": "within_tolerance" if is_pass else "outside_tolerance",
+            }
+        )
+        return fields
+
     def apply_frequency(
         self,
         *,
@@ -256,6 +331,13 @@ class DVFSController:
             conf_path=conf_path,
             dry_run=dry_run,
         )
+        requested_mhz = float(frequency_hz) / 1e6
+        verification = self._build_verification_fields(
+            requested_mhz=requested_mhz,
+            status=str(apply_result["status"]),
+            returncode=int(apply_result["returncode"]),
+            stdout=str(apply_result["stdout"]),
+        )
 
         rows: list[dict[str, Any]] = []
         for core in cores:
@@ -273,6 +355,7 @@ class DVFSController:
                     "returncode": apply_result["returncode"],
                     "stdout": apply_result["stdout"],
                     "stderr": apply_result["stderr"],
+                    **verification,
                 }
             )
         return rows

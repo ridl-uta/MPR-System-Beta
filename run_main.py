@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import queue
 import shlex
 import threading
@@ -162,6 +163,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional SSH user for remote DVFS apply (e.g. ridl).",
     )
+    parser.add_argument(
+        "--dvfs-step-mhz",
+        type=float,
+        default=100.0,
+        help="Snap DVFS targets down to this hardware step in MHz (default: 100).",
+    )
+    parser.add_argument(
+        "--dvfs-verify-tol-mhz",
+        type=float,
+        default=25.0,
+        help="Allowed absolute target-vs-readback error (MHz) for PASS/FAIL verification.",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
@@ -180,6 +193,10 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.enable_power_monitor and (not args.pdu_user or not args.pdu_password):
         parser.error("--enable-power-monitor requires --pdu-user and --pdu-password.")
+    if args.dvfs_step_mhz <= 0:
+        parser.error("--dvfs-step-mhz must be > 0.")
+    if args.dvfs_verify_tol_mhz < 0:
+        parser.error("--dvfs-verify-tol-mhz must be >= 0.")
     try:
         args.job_ranks = parse_job_ranks(args.rank)
         args.submit_env_map = parse_key_value_overrides(args.submit_env)
@@ -598,7 +615,10 @@ def apply_dvfs_with_allocations(
         print("\nNo submitted job allocations available for DVFS apply. Skipping.")
         return {}
 
-    dvfs_controller = DVFSController(ssh_user=args.dvfs_ssh_user)
+    dvfs_controller = DVFSController(
+        ssh_user=args.dvfs_ssh_user,
+        verify_tolerance_mhz=float(args.dvfs_verify_tol_mhz),
+    )
     dvfs_rows: list[dict[str, object]] = []
     used_allocations: dict[str, dict[str, Any]] = {}
     for job_name, target_freq_mhz in job_freq_mhz.items():
@@ -610,14 +630,27 @@ def apply_dvfs_with_allocations(
         if not isinstance(cores_by_node, dict) or not cores_by_node:
             print(f"[DVFS] No core mapping for job '{job_name}', skipping.")
             continue
+        requested_target_mhz = float(target_freq_mhz)
+        snapped_target_mhz = snap_floor_frequency_mhz(
+            requested_mhz=requested_target_mhz,
+            step_mhz=float(args.dvfs_step_mhz),
+        )
+        if abs(snapped_target_mhz - requested_target_mhz) > 1e-9:
+            print(
+                f"[DVFS] {job_name}: target snapped "
+                f"{requested_target_mhz:.3f} -> {snapped_target_mhz:.3f} MHz "
+                f"(step={float(args.dvfs_step_mhz):.3f})"
+            )
         before_count = len(dvfs_rows)
         for row in dvfs_controller.apply_to_job_allocation(
             allocation=allocation,
-            frequency_mhz=float(target_freq_mhz),
+            frequency_mhz=snapped_target_mhz,
             dry_run=args.dry_run,
         ):
             row_with_job = dict(row)
             row_with_job["job"] = job_name
+            row_with_job["requested_target_mhz"] = requested_target_mhz
+            row_with_job["applied_target_mhz"] = snapped_target_mhz
             dvfs_rows.append(row_with_job)
         if len(dvfs_rows) > before_count:
             used_allocations[job_name] = allocation
@@ -627,9 +660,49 @@ def apply_dvfs_with_allocations(
         return used_allocations
 
     dvfs_df = pd.DataFrame(dvfs_rows)
-    print("\nDVFS apply summary:")
-    print(dvfs_df.to_string(index=False))
+    print_dvfs_apply_summary(dvfs_df)
     return used_allocations
+
+
+def snap_floor_frequency_mhz(*, requested_mhz: float, step_mhz: float) -> float:
+    requested = float(requested_mhz)
+    step = float(step_mhz)
+    if step <= 0.0:
+        raise ValueError("step_mhz must be > 0")
+    snapped = math.floor(requested / step) * step
+    # Keep strictly positive request for controller/config paths.
+    if snapped <= 0.0:
+        snapped = step
+    return float(snapped)
+
+
+def print_dvfs_apply_summary(dvfs_df: pd.DataFrame) -> None:
+    host_summary = (
+        dvfs_df.groupby(["job", "node_name"], as_index=False)
+        .agg(
+            cores=("core_number", "nunique"),
+            requested_target_mhz=("requested_target_mhz", "first"),
+            applied_target_mhz=("applied_target_mhz", "first"),
+            readback_avg_mhz=("readback_avg_mhz", "first"),
+            readback_min_mhz=("readback_min_mhz", "first"),
+            readback_max_mhz=("readback_max_mhz", "first"),
+            readback_abs_error_mhz=("readback_abs_error_mhz", "first"),
+            verify_tolerance_mhz=("verify_tolerance_mhz", "first"),
+            verify_status=("verify_status", "first"),
+            verify_reason=("verify_reason", "first"),
+            status=("status", "first"),
+        )
+        .sort_values(["job", "node_name"])
+        .reset_index(drop=True)
+    )
+    print("\nDVFS apply summary:")
+    print(host_summary.to_string(index=False))
+
+    failure_rows = host_summary[~host_summary["verify_status"].isin(["PASS", "SKIP_DRY_RUN"])]
+    if not failure_rows.empty:
+        print("\nDVFS verification details (non-pass):")
+        detail_cols = ["job", "node_name", "status", "verify_status", "verify_reason"]
+        print(failure_rows[detail_cols].to_string(index=False))
 
 
 def parse_sample_timestamp(ts_text: str) -> datetime:
