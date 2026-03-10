@@ -14,6 +14,10 @@ class DVFSController:
 
     _DEFAULT_CONF_DIR = Path("/shared/geopm/freq")
     _CPU_READBACK_RE = re.compile(r"^cpu\d+:\s*([0-9]+(?:\.[0-9]+)?)\s*MHz$", flags=re.IGNORECASE)
+    _GEOPMREAD_RE = re.compile(
+        r"^GEOPMREAD\s+([A-Z0-9_]+)\s+(core|cpu)\s+([0-9]+)\s+([-+0-9.eE]+)\s*$",
+        flags=re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -210,17 +214,57 @@ class DVFSController:
             Path(hosts_file).unlink(missing_ok=True)
 
     @classmethod
-    def _extract_readback_mhz(cls, stdout: str) -> List[float]:
-        values: list[float] = []
+    def _normalize_freq_to_mhz(cls, raw_value: float) -> float:
+        # GEOPM frequency signals/controls are generally Hz-scale values.
+        # Fall back to plain MHz if a small value is reported.
+        val = float(raw_value)
+        if abs(val) >= 100_000.0:
+            return val / 1e6
+        return val
+
+    @classmethod
+    def _extract_readback_values(
+        cls,
+        stdout: str,
+    ) -> tuple[List[float], str, str]:
+        geopm_by_signal: dict[str, list[float]] = {}
+        for line in str(stdout).splitlines():
+            match = cls._GEOPMREAD_RE.match(line.strip())
+            if not match:
+                continue
+            signal = str(match.group(1)).upper()
+            value_text = str(match.group(4))
+            try:
+                value = float(value_text)
+            except ValueError:
+                continue
+            if not value == value:  # NaN check
+                continue
+            geopm_by_signal.setdefault(signal, []).append(cls._normalize_freq_to_mhz(value))
+
+        signal_priority = (
+            "CPU_FREQUENCY_MAX_CONTROL",
+            "CPU_FREQUENCY_CONTROL",
+            "CPU_FREQUENCY_STATUS",
+        )
+        for signal_name in signal_priority:
+            values = geopm_by_signal.get(signal_name, [])
+            if values:
+                return values, "geopmread", signal_name
+
+        sysfs_values: list[float] = []
         for line in str(stdout).splitlines():
             match = cls._CPU_READBACK_RE.match(line.strip())
             if not match:
                 continue
             try:
-                values.append(float(match.group(1)))
+                sysfs_values.append(float(match.group(1)))
             except ValueError:
                 continue
-        return values
+        if sysfs_values:
+            return sysfs_values, "sysfs", "scaling_max_freq"
+
+        return [], "none", ""
 
     def _build_verification_fields(
         self,
@@ -238,6 +282,8 @@ class DVFSController:
             "readback_avg_mhz": None,
             "readback_error_mhz": None,
             "readback_abs_error_mhz": None,
+            "readback_source": "none",
+            "readback_signal": "",
             "verify_status": "NO_READBACK",
             "verify_reason": "no_readback_values",
         }
@@ -252,10 +298,12 @@ class DVFSController:
             fields["verify_reason"] = "apply_command_failed"
             return fields
 
-        readback_values = self._extract_readback_mhz(stdout)
+        readback_values, readback_source, readback_signal = self._extract_readback_values(stdout)
+        fields["readback_source"] = readback_source
+        fields["readback_signal"] = readback_signal
         if not readback_values:
             fields["verify_status"] = "NO_READBACK"
-            fields["verify_reason"] = "no_cpu_readback_lines"
+            fields["verify_reason"] = "no_geopmread_or_sysfs_readback"
             return fields
 
         readback_min = min(readback_values)

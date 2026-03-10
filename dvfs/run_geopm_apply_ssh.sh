@@ -191,6 +191,29 @@ build_remote_cmd() {
   printf '  if [ $status -eq 0 ]; then\n'
   cat <<'EOF'
     echo "=== $(date '+%H:%M:%S') ==="
+    if command -v geopmread >/dev/null 2>&1; then
+      core_ids=$(lscpu -p=CORE 2>/dev/null | awk -F, '/^[^#]/ {print $1}' | sort -n | uniq)
+      cpu_ids=$(lscpu -p=CPU 2>/dev/null | awk -F, '/^[^#]/ {print $1}' | sort -n | uniq)
+      for signal in CPU_FREQUENCY_MAX_CONTROL CPU_FREQUENCY_CONTROL CPU_FREQUENCY_STATUS; do
+        for domain in core cpu; do
+          if [ "$domain" = "core" ]; then
+            ids="$core_ids"
+          else
+            ids="$cpu_ids"
+          fi
+          for idx in $ids; do
+            value=$(geopmread "$signal" "$domain" "$idx" 2>/dev/null || true)
+            case "$value" in
+              ""|NaN|nan|NAN)
+                continue
+                ;;
+            esac
+            printf "GEOPMREAD %s %s %s %s\n" "$signal" "$domain" "$idx" "$value"
+          done
+        done
+      done
+    fi
+    # Keep sysfs readback as fallback/debug output if geopmread values are unavailable.
     for c in /sys/devices/system/cpu/cpu[0-9]*; do
       max_file="$c/cpufreq/scaling_max_freq"
       if [ -f "$max_file" ]; then
