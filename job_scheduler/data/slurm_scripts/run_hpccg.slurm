@@ -25,6 +25,7 @@ SIZE=${SIZE:-180}
 NX=${NX:-$SIZE}
 NY=${NY:-$SIZE}
 NZ=${NZ:-$SIZE}
+HPCCG_REPEAT=${HPCCG_REPEAT:-3}
 
 echo "========== HPCCG Slurm Launch =========="
 echo "SLURM_JOBID             = ${SLURM_JOBID}"
@@ -39,6 +40,7 @@ echo "OMP_PLACES              = ${OMP_PLACES}"
 echo
 echo "HPCCG_BIN               = ${HPCCG_BIN}"
 echo "NX NY NZ                = ${NX} ${NY} ${NZ}"
+echo "HPCCG_REPEAT            = ${HPCCG_REPEAT}"
 echo "========================================"
 
 cd "$WORKDIR"
@@ -48,5 +50,14 @@ if [[ ! -x "$HPCCG_BIN" ]]; then
   exit 2
 fi
 
-# Launch HPCCG with the configured grid dimensions. Allow MPI_IFACE override.
-srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores "$HPCCG_BIN" "$NX" "$NY" "$NZ"
+if [[ ! "$HPCCG_REPEAT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] HPCCG_REPEAT must be a positive integer, got: $HPCCG_REPEAT" >&2
+  exit 2
+fi
+
+# Launch HPCCG repeatedly with the configured grid dimensions. This is useful
+# for extending steady-state runtime without forcing larger problem sizes.
+for ((run_idx = 1; run_idx <= HPCCG_REPEAT; run_idx++)); do
+  echo "========== HPCCG Iteration ${run_idx}/${HPCCG_REPEAT} =========="
+  srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores "$HPCCG_BIN" "$NX" "$NY" "$NZ"
+done
