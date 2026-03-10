@@ -13,7 +13,10 @@ class DVFSController:
     """Apply DVFS using run_geopm_apply_ssh.sh + per-host config files."""
 
     _DEFAULT_CONF_DIR = Path("/shared/geopm/freq")
-    _CPU_READBACK_RE = re.compile(r"^cpu\d+:\s*([0-9]+(?:\.[0-9]+)?)\s*MHz$", flags=re.IGNORECASE)
+    _CPU_READBACK_RE = re.compile(
+        r"^cpu([0-9]+):\s*([0-9]+(?:\.[0-9]+)?)\s*MHz$",
+        flags=re.IGNORECASE,
+    )
     _GEOPMREAD_RE = re.compile(
         r"^GEOPMREAD\s+([A-Z0-9_]+)\s+(core|cpu)\s+([0-9]+)\s+([-+0-9.eE]+)\s*$",
         flags=re.IGNORECASE,
@@ -226,21 +229,31 @@ class DVFSController:
     def _extract_readback_values(
         cls,
         stdout: str,
+        target_indices: Iterable[int] | None = None,
     ) -> tuple[List[float], str, str]:
-        geopm_by_signal: dict[str, list[float]] = {}
+        target_set: set[int] | None = None
+        if target_indices is not None:
+            target_set = {int(i) for i in target_indices}
+
+        geopm_by_signal: dict[str, dict[str, list[tuple[int, float]]]] = {}
         for line in str(stdout).splitlines():
             match = cls._GEOPMREAD_RE.match(line.strip())
             if not match:
                 continue
             signal = str(match.group(1)).upper()
+            domain = str(match.group(2)).lower()
+            index_text = str(match.group(3))
             value_text = str(match.group(4))
             try:
+                index = int(index_text)
                 value = float(value_text)
             except ValueError:
                 continue
             if not value == value:  # NaN check
                 continue
-            geopm_by_signal.setdefault(signal, []).append(cls._normalize_freq_to_mhz(value))
+            geopm_by_signal.setdefault(signal, {}).setdefault(domain, []).append(
+                (index, cls._normalize_freq_to_mhz(value))
+            )
 
         signal_priority = (
             "CPU_FREQUENCY_MAX_CONTROL",
@@ -248,9 +261,26 @@ class DVFSController:
             "CPU_FREQUENCY_STATUS",
         )
         for signal_name in signal_priority:
-            values = geopm_by_signal.get(signal_name, [])
-            if values:
-                return values, "geopmread", signal_name
+            domain_map = geopm_by_signal.get(signal_name, {})
+            if not domain_map:
+                continue
+            for domain_name in ("core", "cpu"):
+                domain_values = domain_map.get(domain_name, [])
+                if not domain_values:
+                    continue
+                if target_set is None:
+                    return [value for _, value in domain_values], "geopmread", signal_name
+                filtered_values = [value for idx, value in domain_values if idx in target_set]
+                if filtered_values:
+                    return filtered_values, "geopmread", signal_name
+
+            # Fallback if target filtering found no matching ids for this signal.
+            # Preserve prior behavior by using all values for the selected signal.
+            all_values: list[float] = []
+            for domain_values in domain_map.values():
+                all_values.extend(value for _, value in domain_values)
+            if all_values:
+                return all_values, "geopmread", signal_name
 
         sysfs_values: list[float] = []
         for line in str(stdout).splitlines():
@@ -258,9 +288,13 @@ class DVFSController:
             if not match:
                 continue
             try:
-                sysfs_values.append(float(match.group(1)))
+                cpu_idx = int(match.group(1))
+                cpu_mhz = float(match.group(2))
             except ValueError:
                 continue
+            if target_set is not None and cpu_idx not in target_set:
+                continue
+            sysfs_values.append(cpu_mhz)
         if sysfs_values:
             return sysfs_values, "sysfs", "scaling_max_freq"
 
@@ -273,6 +307,7 @@ class DVFSController:
         status: str,
         returncode: int,
         stdout: str,
+        target_core_numbers: Iterable[int] | None = None,
     ) -> Dict[str, Any]:
         fields: dict[str, Any] = {
             "verify_tolerance_mhz": float(self.verify_tolerance_mhz),
@@ -298,7 +333,10 @@ class DVFSController:
             fields["verify_reason"] = "apply_command_failed"
             return fields
 
-        readback_values, readback_source, readback_signal = self._extract_readback_values(stdout)
+        readback_values, readback_source, readback_signal = self._extract_readback_values(
+            stdout,
+            target_indices=target_core_numbers,
+        )
         fields["readback_source"] = readback_source
         fields["readback_signal"] = readback_signal
         if not readback_values:
@@ -385,6 +423,7 @@ class DVFSController:
             status=str(apply_result["status"]),
             returncode=int(apply_result["returncode"]),
             stdout=str(apply_result["stdout"]),
+            target_core_numbers=cores,
         )
 
         rows: list[dict[str, Any]] = []
