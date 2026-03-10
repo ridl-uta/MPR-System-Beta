@@ -193,9 +193,26 @@ def parse_args() -> argparse.Namespace:
         help="Interval for printing power monitor status in terminal.",
     )
     parser.add_argument(
+        "--post-jobs-monitor-s",
+        type=float,
+        default=60.0,
+        help=(
+            "Keep monitoring power/events for this many seconds after jobs complete "
+            "(default: 60)."
+        ),
+    )
+    parser.add_argument(
         "--skip-dvfs-apply",
         action="store_true",
         help="Skip applying computed per-job frequencies through DVFS controller.",
+    )
+    parser.add_argument(
+        "--detect-overload-only",
+        action="store_true",
+        help=(
+            "Detect and log overload/handled/end events only. "
+            "Skips MPR negotiation and DVFS apply/reset actions."
+        ),
     )
     parser.add_argument(
         "--dvfs-ssh-user",
@@ -236,6 +253,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--dvfs-step-mhz must be > 0.")
     if args.dvfs_verify_tol_mhz < 0:
         parser.error("--dvfs-verify-tol-mhz must be >= 0.")
+    if args.post_jobs_monitor_s < 0:
+        parser.error("--post-jobs-monitor-s must be >= 0.")
     if args.overload_hysteresis_w < 0:
         parser.error("--overload-hysteresis-w must be >= 0.")
     if args.overload_min_over_s < 0:
@@ -1014,9 +1033,18 @@ def run_event_driven_control_loop(
     next_job_print = 0.0
     job_states: dict[str, str] = {}
 
+    control_actions_enabled = not bool(args.detect_overload_only)
+    post_jobs_monitor_s = max(0.0, float(args.post_jobs_monitor_s))
     reduction_active = False
     reset_applied = True
+    jobs_completed_since: float | None = None
     allocations_cache: dict[str, dict[str, Any]] = {}
+
+    if not control_actions_enabled:
+        print(
+            "[Control] detect-overload-only mode enabled: "
+            "MPR/DVFS actions are disabled."
+        )
 
     while True:
         now = time.monotonic()
@@ -1045,18 +1073,23 @@ def run_event_driven_control_loop(
             )
 
             if event_name == "OVERLOAD_START":
-                reduction_applied, allocations_cache = apply_overload_reduction(
-                    args=args,
-                    scheduler=scheduler,
-                    job_perf_data=job_perf_data,
-                    current_power_w=total_watts,
-                    allocations_cache=allocations_cache,
-                )
-                if reduction_applied:
-                    reduction_active = True
-                    reset_applied = False
+                if not control_actions_enabled:
+                    print("[Control] OVERLOAD_START observed (no control action in detect-overload-only mode).")
+                else:
+                    reduction_applied, allocations_cache = apply_overload_reduction(
+                        args=args,
+                        scheduler=scheduler,
+                        job_perf_data=job_perf_data,
+                        current_power_w=total_watts,
+                        allocations_cache=allocations_cache,
+                    )
+                    if reduction_applied:
+                        reduction_active = True
+                        reset_applied = False
             elif event_name == "OVERLOAD_END":
-                if reduction_active and not reset_applied:
+                if not control_actions_enabled:
+                    print("[Control] OVERLOAD_END observed (no DVFS reset in detect-overload-only mode).")
+                elif reduction_active and not reset_applied:
                     allocations_cache = apply_reset_to_max_frequency(
                         scheduler=scheduler,
                         args=args,
@@ -1082,19 +1115,25 @@ def run_event_driven_control_loop(
                     print("[Control] overload handled zone reached.")
 
         jobs_active = has_active_jobs(job_states)
-        if not jobs_active:
-            if reduction_active and not reset_applied:
-                print("[Control] Jobs ended while reduction active; applying safety DVFS reset.")
-                allocations_cache = apply_reset_to_max_frequency(
-                    scheduler=scheduler,
-                    args=args,
-                    job_names=list(job_ranks.keys()),
-                    allocations_cache=allocations_cache,
+        if jobs_active:
+            jobs_completed_since = None
+        else:
+            now_done = time.monotonic()
+            if jobs_completed_since is None:
+                jobs_completed_since = now_done
+                print(
+                    "[Control] All submitted jobs completed. "
+                    f"Continuing monitor/event loop for {post_jobs_monitor_s:.1f}s."
                 )
-                reduction_active = False
-                reset_applied = True
-            print("All submitted jobs completed. Exiting event-driven control loop.")
-            break
+            elapsed_after_jobs = now_done - jobs_completed_since
+            if elapsed_after_jobs >= post_jobs_monitor_s:
+                if reduction_active and not reset_applied:
+                    print(
+                        "[Control] Post-job monitor window ended before OVERLOAD_END; "
+                        "leaving frequencies unchanged (no automatic reset)."
+                    )
+                print("Post-job monitoring window ended. Exiting event-driven control loop.")
+                break
 
         time.sleep(loop_interval_s)
 
