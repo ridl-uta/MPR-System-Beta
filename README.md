@@ -157,3 +157,30 @@ For `minimd` and `comd`, script args are loaded from the CSV by rank unless over
 - `--dry-run` prints exact `sbatch` commands and does not submit.
 - If overload is `<= 0`, market/DVFS actions are skipped.
 - DVFS apply requires real submitted allocations (`--dry-run` + `--skip-submit` will not have allocations).
+
+## Overload Detection Unit Tests
+
+Unit tests for handled-zone overload logic are in `tests/test_overload_detection.py`.
+
+Run only this test module:
+
+```bash
+python3 -m unittest -v tests.test_overload_detection
+```
+
+Run all tests under `tests/`:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+Run one specific test:
+
+```bash
+python3 -m unittest -v tests.test_overload_detection.TestOverloadDetectionHandledZone.test_handled_zone_allows_power_above_target
+```
+
+These tests validate:
+- handled zone can include watts above target (`handled_high_margin_w`)
+- zero high margin does not mark above-target power as handled
+- explicit low-margin override is applied to handled-zone bounds

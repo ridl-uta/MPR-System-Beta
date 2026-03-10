@@ -23,6 +23,8 @@ def make_simple_overload_ctx(
     ramp_slope_w: float = 15.0,
     ramp_slope_reset_w: float = 5.0,
     handled_window_s: float = 10.0,
+    handled_high_margin_w: float = 0.0,
+    handled_low_margin_w: Optional[float] = None,
     enable_handled: bool = True,
     peak_window_s: Optional[float] = None,
 ):
@@ -69,6 +71,10 @@ def make_simple_overload_ctx(
         'ramp_slope_w': slope_trigger,
         'ramp_slope_reset_w': slope_reset,
         'handled_required_samples': handled_window,
+        'handled_high_margin_w': float(handled_high_margin_w),
+        'handled_low_margin_w': (
+            None if handled_low_margin_w is None else float(handled_low_margin_w)
+        ),
         'handled_enabled': bool(enable_handled),
         'fast_samples': deque(),
         'slow_samples': deque(),
@@ -219,8 +225,17 @@ def simple_overload_update(ctx, ts, watts):
         consecutive_high = 0
     ctx['consecutive_high_samples'] = consecutive_high
 
-    # Handled band means overload is reduced below capacity but not fully ended.
-    between = T_low < sample < T_high
+    # Handled zone means overload is sufficiently reduced around/under capacity.
+    # Defaults preserve prior behavior: low bound tracks dynamic T_low and high bound is T_high.
+    handled_low_margin = ctx.get('handled_low_margin_w')
+    if handled_low_margin is None:
+        handled_zone_low = T_low
+    else:
+        handled_zone_low = T_high - float(handled_low_margin)
+    handled_zone_high = T_high + float(ctx.get('handled_high_margin_w', 0.0))
+    if handled_zone_low > handled_zone_high:
+        handled_zone_low = handled_zone_high
+    in_handled_zone = handled_zone_low <= sample <= handled_zone_high
 
     if state == 'NORMAL':
         if consecutive_high >= ctx['required_high_samples']:
@@ -259,7 +274,7 @@ def simple_overload_update(ctx, ts, watts):
     handled_enabled = ctx.get('handled_enabled', True)
 
     if state == 'OVERLOAD' and handled_enabled:
-        if between:
+        if in_handled_zone:
             ctx['consecutive_mid_samples'] += 1
         else:
             ctx['consecutive_mid_samples'] = 0
@@ -267,13 +282,17 @@ def simple_overload_update(ctx, ts, watts):
         if ctx['consecutive_mid_samples'] >= ctx['handled_required_samples']:
             ctx['state'] = 'OVERLOAD_HANDLED'
             ctx['handled_since'] = ts
-            return 'OVERLOAD_HANDLED', {'watts': sample}
+            return 'OVERLOAD_HANDLED', {
+                'watts': sample,
+                'zone_low_w': handled_zone_low,
+                'zone_high_w': handled_zone_high,
+            }
 
     elif state == 'OVERLOAD_HANDLED' and handled_enabled:
-        if sample >= T_high:
+        if sample > handled_zone_high:
             ctx['state'] = 'OVERLOAD'
             ctx['consecutive_mid_samples'] = 0
-        elif not between:
+        elif not in_handled_zone:
             ctx['consecutive_mid_samples'] = 0
         else:
             ctx['consecutive_mid_samples'] += 1

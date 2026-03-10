@@ -98,6 +98,45 @@ def parse_args() -> argparse.Namespace:
         help="Power capacity threshold. Overload watts = max(current_power - target_capacity, 0).",
     )
     parser.add_argument(
+        "--overload-hysteresis-w",
+        type=float,
+        default=20.0,
+        help="Hysteresis width (watts) below target used by overload detector.",
+    )
+    parser.add_argument(
+        "--overload-min-over-s",
+        type=float,
+        default=10.0,
+        help="Seconds above threshold required to enter OVERLOAD state.",
+    )
+    parser.add_argument(
+        "--overload-cooldown-s",
+        type=float,
+        default=30.0,
+        help="Seconds below low threshold required to emit OVERLOAD_END.",
+    )
+    parser.add_argument(
+        "--overload-handled-window-s",
+        type=float,
+        default=10.0,
+        help="Seconds inside handled zone required to emit OVERLOAD_HANDLED.",
+    )
+    parser.add_argument(
+        "--overload-handled-high-margin-w",
+        type=float,
+        default=0.0,
+        help="Allowed watts above target for handled-zone classification.",
+    )
+    parser.add_argument(
+        "--overload-handled-low-margin-w",
+        type=float,
+        default=None,
+        help=(
+            "Optional handled-zone margin below target. "
+            "Default tracks detector dynamic low threshold."
+        ),
+    )
+    parser.add_argument(
         "--current-power-w",
         type=float,
         default=None,
@@ -197,6 +236,21 @@ def parse_args() -> argparse.Namespace:
         parser.error("--dvfs-step-mhz must be > 0.")
     if args.dvfs_verify_tol_mhz < 0:
         parser.error("--dvfs-verify-tol-mhz must be >= 0.")
+    if args.overload_hysteresis_w < 0:
+        parser.error("--overload-hysteresis-w must be >= 0.")
+    if args.overload_min_over_s < 0:
+        parser.error("--overload-min-over-s must be >= 0.")
+    if args.overload_cooldown_s < 0:
+        parser.error("--overload-cooldown-s must be >= 0.")
+    if args.overload_handled_window_s < 0:
+        parser.error("--overload-handled-window-s must be >= 0.")
+    if args.overload_handled_high_margin_w < 0:
+        parser.error("--overload-handled-high-margin-w must be >= 0.")
+    if (
+        args.overload_handled_low_margin_w is not None
+        and args.overload_handled_low_margin_w < 0
+    ):
+        parser.error("--overload-handled-low-margin-w must be >= 0.")
     try:
         args.job_ranks = parse_job_ranks(args.rank)
         args.submit_env_map = parse_key_value_overrides(args.submit_env)
@@ -732,6 +786,12 @@ def power_monitor_worker(
     overload_event_queue: queue.Queue[dict[str, Any]],
     target_capacity_w: float,
     sample_period_s: float,
+    overload_hysteresis_w: float,
+    overload_min_over_s: float,
+    overload_cooldown_s: float,
+    overload_handled_window_s: float,
+    overload_handled_high_margin_w: float,
+    overload_handled_low_margin_w: float | None,
 ) -> None:
     print_interval = max(0.1, float(print_interval_s))
     poll_interval = max(0.1, min(0.5, float(sample_period_s) * 0.5))
@@ -740,6 +800,16 @@ def power_monitor_worker(
     overload_ctx = make_simple_overload_ctx(
         sample_period_s=max(0.1, float(sample_period_s)),
         threshold_w=float(target_capacity_w),
+        hysteresis_w=float(overload_hysteresis_w),
+        min_over_s=float(overload_min_over_s),
+        cooldown_s=float(overload_cooldown_s),
+        handled_window_s=float(overload_handled_window_s),
+        handled_high_margin_w=float(overload_handled_high_margin_w),
+        handled_low_margin_w=(
+            None
+            if overload_handled_low_margin_w is None
+            else float(overload_handled_low_margin_w)
+        ),
     )
 
     while not stop_event.is_set():
@@ -817,6 +887,12 @@ def start_power_monitor(
             overload_event_queue,
             args.target_capacity_w,
             args.power_interval_s,
+            args.overload_hysteresis_w,
+            args.overload_min_over_s,
+            args.overload_cooldown_s,
+            args.overload_handled_window_s,
+            args.overload_handled_high_margin_w,
+            args.overload_handled_low_margin_w,
         ),
         daemon=True,
         name="PowerMonitorEvents",
@@ -990,7 +1066,20 @@ def run_event_driven_control_loop(
                     reduction_active = False
                     reset_applied = True
             elif event_name == "OVERLOAD_HANDLED":
-                print("[Control] overload handled band reached.")
+                payload = event.get("payload", {})
+                if isinstance(payload, dict):
+                    zone_low = payload.get("zone_low_w")
+                    zone_high = payload.get("zone_high_w")
+                else:
+                    zone_low = None
+                    zone_high = None
+                if zone_low is not None and zone_high is not None:
+                    print(
+                        "[Control] overload handled zone reached: "
+                        f"{float(zone_low):.3f}W..{float(zone_high):.3f}W"
+                    )
+                else:
+                    print("[Control] overload handled zone reached.")
 
         jobs_active = has_active_jobs(job_states)
         if not jobs_active:
