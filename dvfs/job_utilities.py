@@ -64,6 +64,43 @@ def expand_list(cpulist: str) -> str:
     return ' '.join(str(n) for n in numbers)
 
 
+def expand_list_to_ints(cpulist: str) -> List[int]:
+    expanded = expand_list(cpulist)
+    if not expanded:
+        return []
+    return [int(token) for token in expanded.split()]
+
+
+def parse_cpu_core_map(mapping_text: str) -> Dict[int, int]:
+    cpu_to_core: Dict[int, int] = {}
+    for line in mapping_text.splitlines():
+        row = line.strip()
+        if not row or row.startswith("#"):
+            continue
+        parts = row.split(",", 1)
+        if len(parts) != 2:
+            continue
+        try:
+            cpu_id = int(parts[0].strip())
+            core_id = int(parts[1].strip())
+        except ValueError:
+            continue
+        cpu_to_core[cpu_id] = core_id
+    return cpu_to_core
+
+
+def map_cpu_ids_to_core_ids(cpu_ids: List[int], cpu_to_core: Dict[int, int]) -> List[int]:
+    seen: set[int] = set()
+    core_ids: List[int] = []
+    for cpu_id in cpu_ids:
+        core_id = cpu_to_core.get(int(cpu_id))
+        if core_id is None or core_id in seen:
+            continue
+        seen.add(core_id)
+        core_ids.append(int(core_id))
+    return sorted(core_ids)
+
+
 def sanitize_host(host: str) -> str:
     """Sanitize hostname for use in shell variable names."""
 
@@ -120,8 +157,12 @@ def collect_host_cores(jobid: str) -> tuple[str, Dict[str, List[int]]]:
         "--immediate=10",
         "bash",
         "-lc",
-        'printf "%s " "$(hostname -s)"; '
-        "awk '/^Cpus_allowed_list:/ {print $2; exit}' /proc/self/status",
+        (
+            'host=$(hostname -s); '
+            'cpus=$(awk \'/^Cpus_allowed_list:/ {print $2; exit}\' /proc/self/status); '
+            'topo=$(lscpu -p=CPU,CORE | awk -F, \'/^[^#]/ {printf "%s:%s,", $1, $2}\' | sed \'s/,$//\'); '
+            'printf "%s\\t%s\\t%s\\n" "$host" "$cpus" "$topo"'
+        ),
     ]
 
     probe = _run_command(probe_cmd)
@@ -137,17 +178,17 @@ def collect_host_cores(jobid: str) -> tuple[str, Dict[str, List[int]]]:
 
     host_map: Dict[str, List[int]] = {}
     for line in output.splitlines():
-        parts = line.strip().split(None, 2)
-        if len(parts) < 2:
+        parts = line.strip().split("\t", 2)
+        if len(parts) < 3:
             continue
-        host, cpulist = parts[0], parts[1]
-        expanded = expand_list(cpulist)
-        if not expanded:
+        host, cpulist, topo_pairs = parts[0].strip(), parts[1].strip(), parts[2].strip()
+        if not host or not cpulist or not topo_pairs:
             continue
-        try:
-            host_map[host] = [int(token) for token in expanded.split()]
-        except ValueError:
-            continue
+        cpu_ids = expand_list_to_ints(cpulist)
+        cpu_to_core = parse_cpu_core_map(topo_pairs.replace(",", "\n").replace(":", ","))
+        core_ids = map_cpu_ids_to_core_ids(cpu_ids, cpu_to_core)
+        if core_ids:
+            host_map[host] = core_ids
 
     if not host_map:
         raise JobCoresError("no cores discovered in probe output", exit_code=3)

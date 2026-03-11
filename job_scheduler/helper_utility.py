@@ -195,6 +195,36 @@ class SlurmHelperUtility:
                     continue
         return numbers
 
+    @staticmethod
+    def parse_cpu_core_map(mapping_text: str) -> Dict[int, int]:
+        cpu_to_core: Dict[int, int] = {}
+        for line in mapping_text.splitlines():
+            row = line.strip()
+            if not row or row.startswith("#"):
+                continue
+            parts = row.split(",", 1)
+            if len(parts) != 2:
+                continue
+            try:
+                cpu_id = int(parts[0].strip())
+                core_id = int(parts[1].strip())
+            except ValueError:
+                continue
+            cpu_to_core[cpu_id] = core_id
+        return cpu_to_core
+
+    @staticmethod
+    def map_cpu_ids_to_core_ids(cpu_ids: Sequence[int], cpu_to_core: Mapping[int, int]) -> List[int]:
+        seen: set[int] = set()
+        core_ids: List[int] = []
+        for cpu_id in cpu_ids:
+            core_id = cpu_to_core.get(int(cpu_id))
+            if core_id is None or core_id in seen:
+                continue
+            seen.add(core_id)
+            core_ids.append(int(core_id))
+        return sorted(core_ids)
+
     def collect_job_cores(self, job_id: str) -> Tuple[str, Dict[str, List[int]]]:
         compact_nodelist, state = self.get_job_nodelist_and_state(job_id)
         hosts = self.expand_nodelist(compact_nodelist)
@@ -211,8 +241,12 @@ class SlurmHelperUtility:
             "--immediate=10",
             "bash",
             "-lc",
-            'printf "%s " "$(hostname -s)"; '
-            "awk '/^Cpus_allowed_list:/ {print $2; exit}' /proc/self/status",
+            (
+                'host=$(hostname -s); '
+                'cpus=$(awk \'/^Cpus_allowed_list:/ {print $2; exit}\' /proc/self/status); '
+                'topo=$(lscpu -p=CPU,CORE | awk -F, \'/^[^#]/ {printf "%s:%s,", $1, $2}\' | sed \'s/,$//\'); '
+                'printf "%s\\t%s\\t%s\\n" "$host" "$cpus" "$topo"'
+            ),
         ]
         probe = self.run_command(probe_cmd)
         if probe.returncode != 0:
@@ -223,14 +257,17 @@ class SlurmHelperUtility:
             row = line.strip()
             if not row:
                 continue
-            parts = row.split(None, 2)
-            if len(parts) < 2:
+            parts = row.split("\t", 2)
+            if len(parts) < 3:
                 continue
-            host = parts[0]
-            cpulist = parts[1]
-            expanded = self.expand_cpu_list(cpulist)
-            if expanded:
-                host_cores[host] = expanded
+            host, cpulist, topo_pairs = parts[0].strip(), parts[1].strip(), parts[2].strip()
+            if not host or not cpulist or not topo_pairs:
+                continue
+            cpu_ids = self.expand_cpu_list(cpulist)
+            cpu_to_core = self.parse_cpu_core_map(topo_pairs.replace(",", "\n").replace(":", ","))
+            core_ids = self.map_cpu_ids_to_core_ids(cpu_ids, cpu_to_core)
+            if core_ids:
+                host_cores[host] = core_ids
         return state, host_cores
 
     def get_job_resource_allocation(self, job_id: str) -> Dict[str, Any]:

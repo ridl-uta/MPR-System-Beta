@@ -262,6 +262,7 @@ For `minimd` and `comd`, script args are loaded from CSV by rank unless overridd
 ## Overload Detection Unit Tests
 
 Unit tests for handled-zone overload logic are in `tests/test_overload_detection.py`.
+DVFS core-mapping and verification tests are in `tests/test_slurm_core_mapping.py`.
 
 Run only this test module:
 
@@ -275,6 +276,12 @@ Run all tests under `tests/`:
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
+Run only the DVFS core-mapping tests:
+
+```bash
+python3 -m unittest -v tests.test_slurm_core_mapping
+```
+
 Run one specific test:
 
 ```bash
@@ -285,3 +292,38 @@ These tests validate:
 - handled zone can include watts above target (`handled_high_margin_w`)
 - zero high margin does not mark above-target power as handled
 - explicit low-margin override is applied to handled-zone bounds
+- Slurm CPU IDs are translated into unique physical core IDs before `CORE_MAX` apply
+- DVFS verification does not fall back to unrelated node-wide readback values
+
+## Live Slurm Core-Mapping Check
+
+Use this to validate a real running Slurm job against the CPU-to-core translation path used by DVFS.
+
+Show available options:
+
+```bash
+python3 -m dvfs.test_slurm_core_mapping --help
+```
+
+Check one running job:
+
+```bash
+python3 -m dvfs.test_slurm_core_mapping --job-id 3173
+```
+
+Check one running job with JSON output:
+
+```bash
+python3 -m dvfs.test_slurm_core_mapping --job-id 3173 --json
+```
+
+Typical flow:
+
+```bash
+squeue -u "$USER"
+python3 -m dvfs.test_slurm_core_mapping --job-id <jobid> --json
+```
+
+Expected result:
+- `PASS` means observed `cores_by_node` matches CPU-to-core translation from the live Slurm allocation.
+- `FAIL` means the allocation path is still targeting the wrong identifiers, so DVFS verification is not trustworthy yet.

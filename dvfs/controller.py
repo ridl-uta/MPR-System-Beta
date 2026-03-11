@@ -230,7 +230,7 @@ class DVFSController:
         cls,
         stdout: str,
         target_indices: Iterable[int] | None = None,
-    ) -> tuple[List[float], str, str]:
+    ) -> tuple[List[float], str, str, str]:
         target_set: set[int] | None = None
         if target_indices is not None:
             target_set = {int(i) for i in target_indices}
@@ -269,18 +269,13 @@ class DVFSController:
                 if not domain_values:
                     continue
                 if target_set is None:
-                    return [value for _, value in domain_values], "geopmread", signal_name
+                    return [value for _, value in domain_values], "geopmread", signal_name, "ok"
                 filtered_values = [value for idx, value in domain_values if idx in target_set]
                 if filtered_values:
-                    return filtered_values, "geopmread", signal_name
+                    return filtered_values, "geopmread", signal_name, "ok"
 
-            # Fallback if target filtering found no matching ids for this signal.
-            # Preserve prior behavior by using all values for the selected signal.
-            all_values: list[float] = []
-            for domain_values in domain_map.values():
-                all_values.extend(value for _, value in domain_values)
-            if all_values:
-                return all_values, "geopmread", signal_name
+            if target_set is not None:
+                return [], "geopmread", signal_name, "target_ids_not_found_in_readback"
 
         sysfs_values: list[float] = []
         for line in str(stdout).splitlines():
@@ -296,9 +291,9 @@ class DVFSController:
                 continue
             sysfs_values.append(cpu_mhz)
         if sysfs_values:
-            return sysfs_values, "sysfs", "scaling_max_freq"
+            return sysfs_values, "sysfs", "scaling_max_freq", "ok"
 
-        return [], "none", ""
+        return [], "none", "", "no_readback_values"
 
     def _build_verification_fields(
         self,
@@ -333,15 +328,15 @@ class DVFSController:
             fields["verify_reason"] = "apply_command_failed"
             return fields
 
-        readback_values, readback_source, readback_signal = self._extract_readback_values(
+        readback_values, readback_source, readback_signal, readback_reason = self._extract_readback_values(
             stdout,
             target_indices=target_core_numbers,
         )
         fields["readback_source"] = readback_source
         fields["readback_signal"] = readback_signal
         if not readback_values:
-            fields["verify_status"] = "NO_READBACK"
-            fields["verify_reason"] = "no_geopmread_or_sysfs_readback"
+            fields["verify_status"] = "FAIL" if readback_reason == "target_ids_not_found_in_readback" else "NO_READBACK"
+            fields["verify_reason"] = readback_reason if readback_reason else "no_geopmread_or_sysfs_readback"
             return fields
 
         readback_min = min(readback_values)
