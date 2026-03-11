@@ -317,11 +317,35 @@ Check one running job with JSON output:
 python3 -m dvfs.test_slurm_core_mapping --job-id 3173 --json
 ```
 
+Auto-submit a job, wait for it to reach `RUNNING`, validate mapping, then keep it running:
+
+```bash
+python3 -m dvfs.test_slurm_core_mapping --submit-job hpccg --ranks 2 --json
+```
+
+Auto-submit a job, validate mapping, then cancel it after the check:
+
+```bash
+python3 -m dvfs.test_slurm_core_mapping --submit-job hpccg --ranks 2 --cancel-after --json
+```
+
 Typical flow:
 
 ```bash
 squeue -u "$USER"
 python3 -m dvfs.test_slurm_core_mapping --job-id <jobid> --json
+```
+
+Typical auto-submit flow:
+
+```bash
+python3 -m dvfs.test_slurm_core_mapping \
+  --submit-job hpccg \
+  --ranks 2 \
+  --exclude ridlserver02 \
+  --wait-running-s 120 \
+  --cancel-after \
+  --json
 ```
 
 Expected result:
