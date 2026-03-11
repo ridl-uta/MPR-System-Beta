@@ -29,8 +29,18 @@ export LD_LIBRARY_PATH=/shared/ompi-pmi2/lib:$LD_LIBRARY_PATH
 export OMPI_MCA_ess=pmi
 export OMPI_MCA_plm=none
 export OMPI_MCA_pml=ob1
-export OMPI_MCA_btl=tcp,self
-export OMPI_MCA_btl_tcp_if_include=eno1
+export OMPI_MCA_btl=self,vader,tcp
+
+# Pick a usable host interface when TCP is needed. Same-node ranks use vader.
+IFACE=$(ip -o -4 addr show up scope global \
+  | awk '!/docker0/ && !/virbr0/ && !/cni0/ {print $2; exit}')
+if [[ -n "${IFACE:-}" ]]; then
+  export OMPI_MCA_btl_tcp_if_include="$IFACE"
+  export OMPI_MCA_oob_tcp_if_include="$IFACE"
+else
+  export OMPI_MCA_btl_tcp_if_exclude=lo,docker0,virbr0,cni0,flannel.1
+  export OMPI_MCA_oob_tcp_if_exclude=lo,docker0,virbr0,cni0,flannel.1
+fi
 
 # OpenMP settings derived from Slurm cpus-per-task.
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
@@ -47,6 +57,7 @@ echo
 echo "OMP_NUM_THREADS         = ${OMP_NUM_THREADS}"
 echo "OMP_PROC_BIND           = ${OMP_PROC_BIND}"
 echo "OMP_PLACES              = ${OMP_PLACES}"
+echo "OMPI_IFACE              = ${IFACE:-auto}"
 echo
 echo "MINIMD_BIN              = ${MINIMD_BIN}"
 echo "MINIMD_ARGS             = ${RUN_ARGS[*]}"
