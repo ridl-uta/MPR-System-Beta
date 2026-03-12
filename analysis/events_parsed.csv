@@ -1,7 +1,0 @@
-timestamp,event,source,line
-2026-03-10 13:26:08.709000+00:00,OVERLOAD_START,overload_event,[OverloadEvent] OVERLOAD_START total_watts=798.0 required_reduction_w=68.000
-2026-03-10 13:26:08.709000+00:00,OVERLOAD_START,control,[Control] event=OVERLOAD_START ts=2026-03-10T13:26:08.709+00:00 total_watts=798.000 required_reduction_w=68.000
-2026-03-10 13:26:08.709000+00:00,DVFS_APPLY,dvfs,[DVFS] xsbenchmpi: target snapped 1407.628 -> 1400.000 MHz (step=100.000)
-2026-03-10 13:26:52.701000+00:00,DVFS_APPLY,dvfs,[DVFS] comd: target snapped 1412.015 -> 1400.000 MHz (step=100.000)
-2026-03-10 13:26:52.701000+00:00,OVERLOAD_HANDLED,overload_event,[OverloadEvent] OVERLOAD_HANDLED total_watts=733.0 required_reduction_w=85.000
-2026-03-10 13:27:09+00:00,OVERLOAD_HANDLED,control,[Control] event=OVERLOAD_HANDLED ts=2026-03-10T13:27:09.000+00:00 total_watts=733.000 required_reduction_w=85.000

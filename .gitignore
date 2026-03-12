@@ -31,3 +31,4 @@ dist/
 
 # Local runtime outputs
 output/
+analysis/

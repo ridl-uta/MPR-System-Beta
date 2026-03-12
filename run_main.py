@@ -98,6 +98,17 @@ def parse_args() -> argparse.Namespace:
         help="Power capacity threshold. Overload watts = max(current_power - target_capacity, 0).",
     )
     parser.add_argument(
+        "--target-offset-w",
+        "--mpr-reduction-offset-w",
+        dest="target_offset_w",
+        type=float,
+        default=0.0,
+        help=(
+            "Extra watts added to the overload reduction passed to MPR only. "
+            "Example: current=920, target=840, offset=20 -> MPR target reduction = 100 W."
+        ),
+    )
+    parser.add_argument(
         "--overload-hysteresis-w",
         type=float,
         default=20.0,
@@ -455,7 +466,7 @@ def run_market(
 def resolve_target_reduction_w(
     args: argparse.Namespace,
     monitor: PowerMonitor | None,
-) -> tuple[float, float]:
+) -> tuple[float, float, float]:
     if args.current_power_w is not None:
         current_power_w = float(args.current_power_w)
     else:
@@ -483,8 +494,22 @@ def resolve_target_reduction_w(
 
         current_power_w = float(sample.get("total_watts", 0.0))
 
-    target_reduction_w = max(0.0, current_power_w - float(args.target_capacity_w))
-    return target_reduction_w, current_power_w
+    overload_w = max(0.0, current_power_w - float(args.target_capacity_w))
+    target_reduction_w = compute_mpr_target_reduction_w(
+        overload_w,
+        float(args.target_offset_w),
+    )
+    return target_reduction_w, current_power_w, overload_w
+
+
+def compute_mpr_target_reduction_w(
+    base_reduction_w: float,
+    target_offset_w: float,
+) -> float:
+    base = max(0.0, float(base_reduction_w))
+    if base <= 0.0:
+        return 0.0
+    return max(0.0, base + float(target_offset_w))
 
 
 def wait_for_initial_power_sample(
@@ -945,16 +970,29 @@ def apply_overload_reduction(
     scheduler: JobScheduler,
     job_perf_data: dict[str, pd.DataFrame],
     current_power_w: float,
+    base_required_reduction_w: float | None,
     allocations_cache: dict[str, dict[str, Any]],
 ) -> tuple[bool, dict[str, dict[str, Any]]]:
-    target_reduction_w = max(0.0, float(current_power_w) - float(args.target_capacity_w))
+    overload_w = max(0.0, float(current_power_w) - float(args.target_capacity_w))
+    base_reduction_w = (
+        overload_w
+        if base_required_reduction_w is None
+        else max(0.0, float(base_required_reduction_w))
+    )
+    target_reduction_w = compute_mpr_target_reduction_w(
+        base_reduction_w,
+        float(args.target_offset_w),
+    )
     print(
         "\nCapacity check:",
         f"current_power_w={current_power_w:.3f}",
         f"target_capacity_w={args.target_capacity_w:.3f}",
-        f"overload_w={target_reduction_w:.3f}",
+        f"overload_w={overload_w:.3f}",
+        f"required_reduction_w={base_reduction_w:.3f}",
+        f"target_offset_w={float(args.target_offset_w):.3f}",
+        f"mpr_target_reduction_w={target_reduction_w:.3f}",
     )
-    if target_reduction_w <= 0.0:
+    if base_reduction_w <= 0.0:
         print("No overload detected (current power is within target capacity).")
         return False, allocations_cache
 
@@ -1081,6 +1119,7 @@ def run_event_driven_control_loop(
                         scheduler=scheduler,
                         job_perf_data=job_perf_data,
                         current_power_w=total_watts,
+                        base_required_reduction_w=required_w,
                         allocations_cache=allocations_cache,
                     )
                     if reduction_applied:
@@ -1179,12 +1218,14 @@ def main() -> int:
                 job_perf_data=job_perf_data,
             )
         else:
-            target_reduction_w, current_power_w = resolve_target_reduction_w(args, monitor)
+            target_reduction_w, current_power_w, overload_w = resolve_target_reduction_w(args, monitor)
             print(
                 "\nCapacity check:",
                 f"current_power_w={current_power_w:.3f}",
                 f"target_capacity_w={args.target_capacity_w:.3f}",
-                f"overload_w={target_reduction_w:.3f}",
+                f"overload_w={overload_w:.3f}",
+                f"target_offset_w={float(args.target_offset_w):.3f}",
+                f"mpr_target_reduction_w={target_reduction_w:.3f}",
             )
             if target_reduction_w > 0.0:
                 market_result = run_market(args, job_perf_data, target_reduction_w)
