@@ -46,6 +46,7 @@ fi
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 export OMP_PROC_BIND=close
 export OMP_PLACES=cores
+COMD_REPEAT=${COMD_REPEAT:-${JOB_REPEAT:-1}}
 
 echo "========== CoMD Slurm Launch =========="
 echo "SLURM_JOBID             = ${SLURM_JOBID}"
@@ -61,6 +62,7 @@ echo "OMPI_IFACE              = ${IFACE:-auto}"
 echo
 echo "COMD_BIN                = ${COMD_BIN}"
 echo "COMD_ARGS               = ${RUN_ARGS[*]}"
+echo "COMD_REPEAT             = ${COMD_REPEAT}"
 echo "======================================="
 
 cd "$WORKDIR"
@@ -70,5 +72,12 @@ if [[ ! -x "$COMD_BIN" ]]; then
   exit 2
 fi
 
-# Launch CoMD.
-srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores "$COMD_BIN" "${RUN_ARGS[@]}"
+if [[ ! "$COMD_REPEAT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] COMD_REPEAT must be a positive integer, got: $COMD_REPEAT" >&2
+  exit 2
+fi
+
+for ((run_idx = 1; run_idx <= COMD_REPEAT; run_idx++)); do
+  echo "========== CoMD Iteration ${run_idx}/${COMD_REPEAT} =========="
+  srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores "$COMD_BIN" "${RUN_ARGS[@]}"
+done

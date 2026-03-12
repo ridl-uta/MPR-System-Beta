@@ -46,6 +46,7 @@ fi
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 export OMP_PROC_BIND=close
 export OMP_PLACES=cores
+MINIMD_REPEAT=${MINIMD_REPEAT:-${JOB_REPEAT:-1}}
 
 echo "========== miniMD Slurm Launch =========="
 echo "SLURM_JOBID             = ${SLURM_JOBID}"
@@ -61,6 +62,7 @@ echo "OMPI_IFACE              = ${IFACE:-auto}"
 echo
 echo "MINIMD_BIN              = ${MINIMD_BIN}"
 echo "MINIMD_ARGS             = ${RUN_ARGS[*]}"
+echo "MINIMD_REPEAT           = ${MINIMD_REPEAT}"
 echo "========================================="
 
 cd "$WORKDIR"
@@ -70,5 +72,12 @@ if [[ ! -x "$MINIMD_BIN" ]]; then
   exit 2
 fi
 
-# Launch miniMD.
-srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores "$MINIMD_BIN" "${RUN_ARGS[@]}"
+if [[ ! "$MINIMD_REPEAT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] MINIMD_REPEAT must be a positive integer, got: $MINIMD_REPEAT" >&2
+  exit 2
+fi
+
+for ((run_idx = 1; run_idx <= MINIMD_REPEAT; run_idx++)); do
+  echo "========== miniMD Iteration ${run_idx}/${MINIMD_REPEAT} =========="
+  srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores "$MINIMD_BIN" "${RUN_ARGS[@]}"
+done

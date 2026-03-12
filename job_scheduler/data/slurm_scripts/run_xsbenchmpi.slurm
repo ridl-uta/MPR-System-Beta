@@ -5,6 +5,8 @@
 #SBATCH --mem-per-cpu=512M
 #SBATCH -o /shared/logs/job-%j.out
 
+set -euo pipefail
+
 # Allow caller to pass working directory (default /shared/bin)
 WORKDIR=${WORKDIR:-/shared/bin}
 
@@ -36,9 +38,35 @@ echo "OMPI_IFACE              = ${IFACE:-auto}"
 # Optional XSBench controls (also supplied by pipeline submitter)
 SIZE=${SIZE:-small}
 LOOKUPS=${LOOKUPS:-10000}
+XSBENCHMPI_REPEAT=${XSBENCHMPI_REPEAT:-${JOB_REPEAT:-1}}
+
+echo "========== XSBenchMPI Slurm Launch =========="
+echo "SLURM_JOBID             = ${SLURM_JOBID}"
+echo "SLURM_JOB_NODELIST      = ${SLURM_JOB_NODELIST}"
+echo "SLURM_NTASKS            = ${SLURM_NTASKS}"
+echo "SLURM_NTASKS_PER_NODE   = ${SLURM_NTASKS_PER_NODE:-}"
+echo "SLURM_CPUS_PER_TASK     = ${SLURM_CPUS_PER_TASK:-1}"
+echo
+echo "OMP_NUM_THREADS         = ${OMP_NUM_THREADS}"
+echo "OMP_PROC_BIND           = ${OMP_PROC_BIND}"
+echo "OMP_PLACES              = ${OMP_PLACES}"
+echo "OMPI_IFACE              = ${IFACE:-auto}"
+echo
+echo "SIZE                    = ${SIZE}"
+echo "LOOKUPS                 = ${LOOKUPS}"
+echo "XSBENCHMPI_REPEAT       = ${XSBENCHMPI_REPEAT}"
+echo "============================================"
 
 cd "$WORKDIR"
 
+if [[ ! "$XSBENCHMPI_REPEAT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] XSBENCHMPI_REPEAT must be a positive integer, got: $XSBENCHMPI_REPEAT" >&2
+  exit 2
+fi
+
 # Multi-rank + OpenMP; keep step success even if XSBench returns non-zero for checksum
 # Allow overriding MPI interface via MPI_IFACE (pmi2|pmix). Default to pmi2 for MPICH builds.
-srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores ./XSBenchMPI -s "$SIZE" -l "$LOOKUPS" -t "$OMP_NUM_THREADS" || true
+for ((run_idx = 1; run_idx <= XSBENCHMPI_REPEAT; run_idx++)); do
+  echo "========== XSBenchMPI Iteration ${run_idx}/${XSBENCHMPI_REPEAT} =========="
+  srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores ./XSBenchMPI -s "$SIZE" -l "$LOOKUPS" -t "$OMP_NUM_THREADS" || true
+done

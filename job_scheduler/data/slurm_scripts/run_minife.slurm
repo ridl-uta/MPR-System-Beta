@@ -39,6 +39,7 @@ export OMP_PLACES=cores
 NX=${NX:-240}
 NY=${NY:-240}
 NZ=${NZ:-240}
+MINIFE_REPEAT=${MINIFE_REPEAT:-${JOB_REPEAT:-1}}
 export NX NY NZ
 
 echo "========== miniFE Slurm Launch =========="
@@ -54,9 +55,17 @@ echo "OMP_PLACES              = ${OMP_PLACES}"
 echo "OMPI_IFACE              = ${IFACE:-auto}"
 echo
 echo "NX NY NZ                = ${NX} ${NY} ${NZ}"
+echo "MINIFE_REPEAT           = ${MINIFE_REPEAT}"
 echo "========================================="
 
 cd "$WORKDIR"
 
-# Launch miniFE with explicit grid flags. Allow MPI_IFACE override.
-srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores ./miniFE.x --nx=$NX --ny=$NY --nz=$NZ
+if [[ ! "$MINIFE_REPEAT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] MINIFE_REPEAT must be a positive integer, got: $MINIFE_REPEAT" >&2
+  exit 2
+fi
+
+for ((run_idx = 1; run_idx <= MINIFE_REPEAT; run_idx++)); do
+  echo "========== miniFE Iteration ${run_idx}/${MINIFE_REPEAT} =========="
+  srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores ./miniFE.x --nx=$NX --ny=$NY --nz=$NZ
+done
