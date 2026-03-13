@@ -126,6 +126,16 @@ def parse_args() -> argparse.Namespace:
         help="Seconds above threshold required to enter OVERLOAD state.",
     )
     parser.add_argument(
+        "--wait-before-mpr-s",
+        type=float,
+        default=0.0,
+        help=(
+            "Seconds to wait after OVERLOAD_START before running MPR. "
+            "During this window, spike/ramp events and power samples can raise "
+            "the reduction target to the highest observed value."
+        ),
+    )
+    parser.add_argument(
         "--overload-cooldown-s",
         type=float,
         default=30.0,
@@ -275,6 +285,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--overload-hysteresis-w must be >= 0.")
     if args.overload_min_over_s < 0:
         parser.error("--overload-min-over-s must be >= 0.")
+    if args.wait_before_mpr_s < 0:
+        parser.error("--wait-before-mpr-s must be >= 0.")
     if args.overload_cooldown_s < 0:
         parser.error("--overload-cooldown-s must be >= 0.")
     if args.overload_handled_window_s < 0:
@@ -662,6 +674,87 @@ def drain_overload_events(
         except queue.Empty:
             break
     return events
+
+
+def wait_before_market_start(
+    *,
+    monitor: PowerMonitor,
+    overload_event_queue: queue.Queue[dict[str, Any]],
+    target_capacity_w: float,
+    initial_total_watts: float,
+    initial_required_reduction_w: float,
+    initial_timestamp: str,
+    wait_before_mpr_s: float,
+    poll_interval_s: float,
+) -> tuple[float, float, str, str | None]:
+    wait_s = max(0.0, float(wait_before_mpr_s))
+    peak_total_watts = max(0.0, float(initial_total_watts))
+    peak_required_reduction_w = max(0.0, float(initial_required_reduction_w))
+    peak_source = "OVERLOAD_START"
+    peak_timestamp = str(initial_timestamp)
+
+    if wait_s <= 0.0:
+        return peak_total_watts, peak_required_reduction_w, peak_source, None
+
+    print(
+        "[Control] Waiting before MPR:",
+        f"wait_before_mpr_s={wait_s:.3f}",
+        "tracking peak reduction from overload/spike/ramp events.",
+    )
+    deadline = time.monotonic() + wait_s
+    peak_event_names = {"OVERLOAD_START", "SPIKE_WARNING", "RAMP_WARNING", "RAMP_PREDICTED"}
+    terminal_event_names = {"OVERLOAD_END", "OVERLOAD_HANDLED"}
+
+    while True:
+        sample = monitor.get_last_sample()
+        if sample is not None:
+            sample_total_watts = float(sample.get("total_watts", 0.0))
+            sample_required_reduction_w = max(0.0, sample_total_watts - float(target_capacity_w))
+            if sample_required_reduction_w > peak_required_reduction_w:
+                peak_total_watts = sample_total_watts
+                peak_required_reduction_w = sample_required_reduction_w
+                peak_source = "POWER_SAMPLE"
+                peak_timestamp = str(sample.get("timestamp", peak_timestamp))
+
+        for event in drain_overload_events(overload_event_queue):
+            event_name = str(event.get("event", ""))
+            ts = str(event.get("timestamp", ""))
+            total_watts = float(event.get("total_watts", 0.0))
+            required_w = float(
+                event.get(
+                    "required_reduction_w",
+                    max(0.0, total_watts - float(target_capacity_w)),
+                )
+            )
+            print(
+                f"[Control] pre-market event={event_name} ts={ts} "
+                f"total_watts={total_watts:.3f} required_reduction_w={required_w:.3f}"
+            )
+            if event_name in peak_event_names and required_w > peak_required_reduction_w:
+                peak_total_watts = total_watts
+                peak_required_reduction_w = required_w
+                peak_source = event_name
+                peak_timestamp = ts
+            if event_name in terminal_event_names:
+                print(
+                    f"[Control] {event_name} observed during wait-before-MPR; "
+                    "skipping market start because overload no longer needs a new action."
+                )
+                return peak_total_watts, peak_required_reduction_w, peak_source, event_name
+
+        remaining_s = deadline - time.monotonic()
+        if remaining_s <= 0.0:
+            break
+        time.sleep(min(max(0.05, float(poll_interval_s)), remaining_s))
+
+    print(
+        "[Control] Pre-market peak selected:",
+        f"source={peak_source}",
+        f"ts={peak_timestamp}",
+        f"peak_total_watts={peak_total_watts:.3f}",
+        f"peak_required_reduction_w={peak_required_reduction_w:.3f}",
+    )
+    return peak_total_watts, peak_required_reduction_w, peak_source, None
 
 
 def compute_frequency_targets(
@@ -1171,12 +1264,33 @@ def run_event_driven_control_loop(
                 if not control_actions_enabled:
                     print("[Control] OVERLOAD_START observed (no control action in detect-overload-only mode).")
                 else:
+                    selected_total_watts = total_watts
+                    selected_required_w = required_w
+                    terminal_event_name: str | None = None
+                    if float(args.wait_before_mpr_s) > 0.0:
+                        (
+                            selected_total_watts,
+                            selected_required_w,
+                            _peak_source,
+                            terminal_event_name,
+                        ) = wait_before_market_start(
+                            monitor=monitor,
+                            overload_event_queue=overload_event_queue,
+                            target_capacity_w=float(args.target_capacity_w),
+                            initial_total_watts=total_watts,
+                            initial_required_reduction_w=required_w,
+                            initial_timestamp=ts,
+                            wait_before_mpr_s=float(args.wait_before_mpr_s),
+                            poll_interval_s=loop_interval_s,
+                        )
+                    if terminal_event_name is not None:
+                        continue
                     reduction_applied, allocations_cache = apply_overload_reduction(
                         args=args,
                         scheduler=scheduler,
                         job_perf_data=job_perf_data,
-                        current_power_w=total_watts,
-                        base_required_reduction_w=required_w,
+                        current_power_w=selected_total_watts,
+                        base_required_reduction_w=selected_required_w,
                         allocations_cache=allocations_cache,
                     )
                     if reduction_applied:
