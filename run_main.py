@@ -44,7 +44,11 @@ def parse_args() -> argparse.Namespace:
         action="append",
         required=True,
         metavar="JOB=RANK",
-        help="Job rank spec (repeatable), e.g. --rank comd=1 --rank minife=2",
+        help=(
+            "Job rank spec (repeatable), e.g. --rank comd=1 --rank minife=2. "
+            "Repeating the same job name submits multiple instances, e.g. "
+            "--rank xsbenchmpi=2 --rank xsbenchmpi=4"
+        ),
     )
     parser.add_argument("--cpus-per-rank", type=int, default=10)
     parser.add_argument("--ranks-per-node", type=int, default=2)
@@ -83,7 +87,8 @@ def parse_args() -> argparse.Namespace:
         metavar="JOB=ARG STRING",
         help=(
             "Override script args for a specific job (repeatable), "
-            "e.g. --job-args \"minimd=-i in.lj.miniMD -n 8000 -t 10\""
+            "e.g. --job-args \"minimd=-i in.lj.miniMD -n 8000 -t 10\". "
+            "For duplicated jobs, a base-name override applies to all instances."
         ),
     )
     parser.add_argument(
@@ -282,7 +287,7 @@ def parse_args() -> argparse.Namespace:
     ):
         parser.error("--overload-handled-low-margin-w must be >= 0.")
     try:
-        args.job_ranks = parse_job_ranks(args.rank)
+        args.job_ranks, args.job_base_names, args.job_display_names = parse_job_specs(args.rank)
         args.submit_env_map = parse_key_value_overrides(args.submit_env)
         args.job_args_map = parse_job_args_overrides(args.job_args)
     except ValueError as exc:
@@ -290,22 +295,64 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def parse_job_ranks(rank_items: list[str]) -> dict[str, int]:
-    job_ranks: dict[str, int] = {}
+def normalize_job_name(job_text: str) -> tuple[str, str]:
+    name = str(job_text).strip()
+    if not name:
+        raise ValueError("Missing job name.")
+
+    if "@" not in name:
+        return name, name
+
+    base_name, alias = name.split("@", 1)
+    base_name = base_name.strip()
+    alias = alias.strip()
+    if not base_name or not alias:
+        raise ValueError(
+            f"Expected JOB@ALIAS format with non-empty base and alias, got: {job_text}"
+        )
+    return f"{base_name}@{alias}", base_name
+
+
+def parse_job_specs(rank_items: list[str]) -> tuple[dict[str, int], dict[str, str], dict[str, str]]:
+    parsed_items: list[tuple[str, str, int, bool]] = []
+    base_counts: dict[str, int] = {}
+
     for item in rank_items:
         if "=" not in item:
             raise ValueError(f"Expected JOB=RANK, got: {item}")
-        job, rank_text = item.split("=", 1)
-        job = job.strip()
-        if not job:
-            raise ValueError(f"Missing job name in: {item}")
+        job_text, rank_text = item.split("=", 1)
+        job_name, base_name = normalize_job_name(job_text)
         rank = int(rank_text.strip())
         if rank <= 0:
-            raise ValueError(f"Rank must be > 0 for job '{job}', got {rank}.")
-        job_ranks[job] = rank
+            raise ValueError(f"Rank must be > 0 for job '{job_name}', got {rank}.")
+        explicit_alias = "@" in str(job_text)
+        parsed_items.append((job_name, base_name, rank, explicit_alias))
+        base_counts[base_name] = base_counts.get(base_name, 0) + 1
+
+    job_ranks: dict[str, int] = {}
+    job_base_names: dict[str, str] = {}
+    job_display_names: dict[str, str] = {}
+    seen_counts: dict[str, int] = {}
+    for normalized_name, base_name, rank, explicit_alias in parsed_items:
+        if explicit_alias:
+            job_key = normalized_name
+            display_name = normalized_name
+        else:
+            occurrence = seen_counts.get(base_name, 0) + 1
+            seen_counts[base_name] = occurrence
+            if base_counts[base_name] > 1:
+                job_key = f"{base_name}#{occurrence}"
+            else:
+                job_key = base_name
+            display_name = base_name
+        if job_key in job_ranks:
+            raise ValueError(f"Duplicate job key '{job_key}' in --rank entries.")
+        job_ranks[job_key] = rank
+        job_base_names[job_key] = base_name
+        job_display_names[job_key] = display_name
     if not job_ranks:
         raise ValueError("At least one --rank JOB=RANK must be provided.")
-    return job_ranks
+    return job_ranks, job_base_names, job_display_names
 
 
 def parse_key_value_overrides(items: list[str]) -> dict[str, str]:
@@ -327,14 +374,18 @@ def parse_job_args_overrides(items: list[str]) -> dict[str, list[str]]:
         if "=" not in raw:
             raise ValueError(f"Expected JOB=ARG STRING in --job-args, got: {raw}")
         job_name, args_text = raw.split("=", 1)
-        job_name = job_name.strip()
-        if not job_name:
-            raise ValueError(f"Missing job name in --job-args value: {raw}")
+        job_name, _ = normalize_job_name(job_name)
         args_tokens = shlex.split(args_text.strip())
         overrides[job_name] = args_tokens
     return overrides
 
-def submit_jobs(scheduler: JobScheduler, args: argparse.Namespace, job_ranks: dict[str, int]) -> pd.DataFrame:
+def submit_jobs(
+    scheduler: JobScheduler,
+    args: argparse.Namespace,
+    job_ranks: dict[str, int],
+    job_base_names: dict[str, str],
+    job_display_names: dict[str, str],
+) -> pd.DataFrame:
     if args.skip_submit:
         print("Skipping Slurm submission step (--skip-submit).")
         return pd.DataFrame()
@@ -351,6 +402,8 @@ def submit_jobs(scheduler: JobScheduler, args: argparse.Namespace, job_ranks: di
             output_path=args.slurm_output,
             mpi_iface=args.mpi_iface,
             env_overrides=args.submit_env_map,
+            job_base_names=job_base_names,
+            job_display_names=job_display_names,
             script_args_by_job=args.job_args_map,
             use_rank_profiles=not args.disable_rank_profiles,
             dry_run=args.dry_run,
@@ -368,6 +421,8 @@ def submit_jobs(scheduler: JobScheduler, args: argparse.Namespace, job_ranks: di
             output_path=args.slurm_output,
             mpi_iface=args.mpi_iface,
             env_overrides=args.submit_env_map,
+            job_base_names=job_base_names,
+            job_display_names=job_display_names,
             script_args_by_job=args.job_args_map,
             use_rank_profiles=not args.disable_rank_profiles,
             dry_run=args.dry_run,
@@ -1202,11 +1257,23 @@ def main() -> int:
         print("Available jobs:", scheduler.available_jobs())
         print("Performance workbook:", scheduler.perf_xlsx_path)
         print("Job ranks:", job_ranks)
+        if any(name != display for name, display in args.job_display_names.items()):
+            print("Job display names:", args.job_display_names)
+        if any(name != base for name, base in args.job_base_names.items()):
+            print("Job base names:", args.job_base_names)
 
-        submit_df = submit_jobs(scheduler, args, job_ranks)
+        submit_df = submit_jobs(
+            scheduler,
+            args,
+            job_ranks,
+            args.job_base_names,
+            args.job_display_names,
+        )
         print_allocations(scheduler, args, submit_df, job_ranks)
 
         job_perf_data = fetch_job_perf_data(scheduler, job_ranks)
+        if args.dry_run:
+            return 0
         if monitor is not None and overload_event_queue is not None:
             run_event_driven_control_loop(
                 scheduler=scheduler,

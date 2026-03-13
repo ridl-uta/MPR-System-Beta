@@ -58,6 +58,7 @@ class JobScheduler:
 
         # Cache loaded performance inputs so market modules can fetch them directly.
         self._job_perf_data_cache: Dict[str, pd.DataFrame] = {}
+        self._job_rank_cache: Dict[str, int] = {}
         self._perf_audit_rows: List[Dict[str, Any]] = []
         self._submission_rows: List[Dict[str, Any]] = []
 
@@ -236,6 +237,9 @@ class JobScheduler:
         self,
         *,
         name: str,
+        job_key: str | None = None,
+        record_name: str | None = None,
+        perf_sheet_name: str | None = None,
         cpus_per_rank: int,
         ranks_per_node: int,
         ranks: int,
@@ -255,10 +259,18 @@ class JobScheduler:
         if not dry_run and shutil.which(self.helper.sbatch_cmd) is None:
             raise RuntimeError(f"{self.helper.sbatch_cmd} not found in PATH.")
 
-        script_path = self.get_script_path(name)
+        base_name = str(name)
+        display_name = str(record_name or name)
+        key_name = str(job_key or display_name)
+        perf_name = str(perf_sheet_name or self.perf_sheet_map.get(base_name, base_name))
+        log_name = display_name if key_name == display_name else f"{display_name} [{key_name}]"
+
+        script_path = self.get_script_path(base_name)
         if not script_path.exists():
             row = {
-                "job": name,
+                "job": display_name,
+                "job_key": key_name,
+                "job_base": base_name,
                 "ranks": int(ranks),
                 "script": str(script_path),
                 "status": "MISSING_SCRIPT",
@@ -272,11 +284,11 @@ class JobScheduler:
         profile_script_args: List[str] = []
         if use_rank_profiles:
             profile_env, profile_script_args = self._rank_profile_for_job(
-                job_name=name,
+                job_name=base_name,
                 ranks=int(ranks),
             )
 
-        merged_env = self._script_overrides_to_env(name)
+        merged_env = self._script_overrides_to_env(base_name)
         merged_env.update(profile_env)
         if mpi_iface:
             merged_env["MPI_IFACE"] = str(mpi_iface)
@@ -303,9 +315,11 @@ class JobScheduler:
         cmd_str = self.helper.format_command(cmd)
 
         if dry_run:
-            print(f"[DRY-RUN] {name}: {cmd_str}")
+            print(f"[DRY-RUN] {log_name}: {cmd_str}")
             row = {
-                "job": name,
+                "job": display_name,
+                "job_key": key_name,
+                "job_base": base_name,
                 "ranks": int(ranks),
                 "script": str(script_path),
                 "nodes": int(nodes),
@@ -316,7 +330,9 @@ class JobScheduler:
                 "script_args": final_script_args,
             }
             if auto_load_perf_data:
-                self._auto_load_perf_data_for_jobs([name])
+                self._job_rank_cache[key_name] = int(ranks)
+                self.perf_sheet_map[key_name] = perf_name
+                self._auto_load_perf_data_for_jobs([key_name])
             self._record_submission_row(row)
             return row
 
@@ -324,9 +340,11 @@ class JobScheduler:
         job_id = self.helper.parse_submitted_job_id(proc.stdout)
         status = "SUBMITTED" if proc.returncode == 0 else "FAILED"
         message = proc.stdout.strip() or proc.stderr.strip()
-        print(f"[{status}] {name}: {message}")
+        print(f"[{status}] {log_name}: {message}")
         row = {
-            "job": name,
+            "job": display_name,
+            "job_key": key_name,
+            "job_base": base_name,
             "ranks": int(ranks),
             "script": str(script_path),
             "nodes": int(nodes),
@@ -341,7 +359,9 @@ class JobScheduler:
             "returncode": proc.returncode,
         }
         if auto_load_perf_data:
-            self._auto_load_perf_data_for_jobs([name])
+            self._job_rank_cache[key_name] = int(ranks)
+            self.perf_sheet_map[key_name] = perf_name
+            self._auto_load_perf_data_for_jobs([key_name])
         self._record_submission_row(row)
         return row
 
@@ -349,6 +369,8 @@ class JobScheduler:
         self,
         *,
         job_ranks: Dict[str, int] | None = None,
+        job_base_names: Dict[str, str] | None = None,
+        job_display_names: Dict[str, str] | None = None,
         name: str | None = None,
         ranks: int | None = None,
         cpus_per_rank: int,
@@ -379,8 +401,18 @@ class JobScheduler:
 
         rows: List[Dict[str, Any]] = []
         for job_name, rank_count in resolved_job_ranks.items():
+            base_name = (job_base_names or {}).get(job_name, job_name)
+            display_name = (job_display_names or {}).get(job_name, base_name)
+            script_args = None
+            if script_args_by_job is not None:
+                script_args = script_args_by_job.get(job_name)
+                if script_args is None and base_name != job_name:
+                    script_args = script_args_by_job.get(base_name)
             row = self.submit_job(
-                name=job_name,
+                name=base_name,
+                job_key=job_name,
+                record_name=display_name,
+                perf_sheet_name=self.perf_sheet_map.get(base_name, base_name),
                 cpus_per_rank=cpus_per_rank,
                 ranks_per_node=ranks_per_node,
                 ranks=int(rank_count),
@@ -391,7 +423,7 @@ class JobScheduler:
                 output_path=output_path,
                 mpi_iface=mpi_iface,
                 env_overrides=env_overrides,
-                script_args=(script_args_by_job or {}).get(job_name),
+                script_args=script_args,
                 use_rank_profiles=use_rank_profiles,
                 dry_run=dry_run,
                 auto_load_perf_data=auto_load_perf_data,
@@ -404,6 +436,8 @@ class JobScheduler:
         self,
         *,
         job_ranks: Dict[str, int] | None = None,
+        job_base_names: Dict[str, str] | None = None,
+        job_display_names: Dict[str, str] | None = None,
         name: str | None = None,
         ranks: int | None = None,
         cpus_per_rank: int,
@@ -434,8 +468,18 @@ class JobScheduler:
         items = list(resolved_job_ranks.items())
         rows: List[Dict[str, Any]] = []
         for index, (job_name, rank_count) in enumerate(items):
+            base_name = (job_base_names or {}).get(job_name, job_name)
+            display_name = (job_display_names or {}).get(job_name, base_name)
+            script_args = None
+            if script_args_by_job is not None:
+                script_args = script_args_by_job.get(job_name)
+                if script_args is None and base_name != job_name:
+                    script_args = script_args_by_job.get(base_name)
             row = self.submit_job(
-                name=job_name,
+                name=base_name,
+                job_key=job_name,
+                record_name=display_name,
+                perf_sheet_name=self.perf_sheet_map.get(base_name, base_name),
                 cpus_per_rank=cpus_per_rank,
                 ranks_per_node=ranks_per_node,
                 ranks=int(rank_count),
@@ -446,7 +490,7 @@ class JobScheduler:
                 output_path=output_path,
                 mpi_iface=mpi_iface,
                 env_overrides=env_overrides,
-                script_args=(script_args_by_job or {}).get(job_name),
+                script_args=script_args,
                 use_rank_profiles=use_rank_profiles,
                 dry_run=dry_run,
                 auto_load_perf_data=auto_load_perf_data,
@@ -471,6 +515,10 @@ class JobScheduler:
         history = pd.DataFrame(self._submission_rows)
         if history.empty or job_names is None:
             return history
+        if "job_key" in history.columns:
+            matched = history[history["job_key"].isin(job_names)].reset_index(drop=True)
+            if not matched.empty:
+                return matched
         if "job" not in history.columns:
             return history
         return history[history["job"].isin(job_names)].reset_index(drop=True)
@@ -514,10 +562,11 @@ class JobScheduler:
             return {}
 
         allocations: Dict[str, Dict[str, Any]] = {}
+        key_column = "job_key" if "job_key" in history.columns else "job"
         if latest_only:
-            latest_rows = history.groupby("job", as_index=False).tail(1)
+            latest_rows = history.groupby(key_column, as_index=False).tail(1)
             for _, row in latest_rows.iterrows():
-                job_name = str(row["job"])
+                job_name = str(row[key_column])
                 job_id = str(row["job_id"]).strip()
                 if not job_id or job_id.lower() in {"none", "nan"}:
                     continue
@@ -525,7 +574,7 @@ class JobScheduler:
             return allocations
 
         for _, row in history.iterrows():
-            job_name = str(row["job"])
+            job_name = str(row[key_column])
             job_id = str(row["job_id"]).strip()
             if not job_id or job_id.lower() in {"none", "nan"}:
                 continue
@@ -537,6 +586,7 @@ class JobScheduler:
         *,
         job_names: List[str],
         sheet_map: Dict[str, str] | None = None,
+        job_ranks: Dict[str, int] | None = None,
         xlsx_path: Path | str | None = None,
     ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
         """Load performance data via scheduler-owned default workbook path."""
@@ -545,6 +595,7 @@ class JobScheduler:
             xlsx_path=chosen_xlsx,
             job_names=job_names,
             sheet_map=sheet_map or {},
+            job_ranks=job_ranks or {},
         )
 
     def set_perf_sheet_map(self, mapping: Dict[str, str]) -> None:
@@ -555,6 +606,7 @@ class JobScheduler:
         loaded, audit_df = self.load_perf_data_for_jobs(
             job_names=job_names,
             sheet_map=self.perf_sheet_map,
+            job_ranks=self._job_rank_cache,
             xlsx_path=self.perf_xlsx_path,
         )
         for job_name, df in loaded.items():

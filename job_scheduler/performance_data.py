@@ -14,6 +14,7 @@ def load_perf_data_for_jobs(
     xlsx_path: Path,
     job_names: list[str],
     sheet_map: dict[str, str],
+    job_ranks: dict[str, int] | None = None,
 ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
     """Load workbook data and keep required MPR columns plus optional frequency columns."""
     if not xlsx_path.exists():
@@ -26,9 +27,23 @@ def load_perf_data_for_jobs(
     audit_rows: list[dict[str, object]] = []
 
     for job_name in job_names:
-        sheet = sheet_map.get(job_name, job_name)
+        base_sheet = sheet_map.get(job_name, job_name)
+        rank_value = (job_ranks or {}).get(job_name)
+        sheet_candidates: list[str] = []
+        if rank_value is not None:
+            sheet_candidates.append(f"{base_sheet}-rank{int(rank_value)}")
+        sheet_candidates.append(base_sheet)
+
+        sheet = next((candidate for candidate in sheet_candidates if candidate in available), None)
         if sheet not in available:
-            audit_rows.append({"job": job_name, "sheet": sheet, "status": "MISSING_SHEET"})
+            audit_rows.append(
+                {
+                    "job": job_name,
+                    "sheet": base_sheet,
+                    "status": "MISSING_SHEET",
+                    "details": ",".join(sheet_candidates),
+                }
+            )
             continue
 
         raw = pd.read_excel(xlsx_path, sheet_name=sheet)
