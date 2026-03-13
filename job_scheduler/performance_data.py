@@ -32,6 +32,7 @@ def load_perf_data_for_jobs(
         sheet_candidates: list[str] = []
         if rank_value is not None:
             sheet_candidates.append(f"{base_sheet}-rank{int(rank_value)}")
+            sheet_candidates.append(f"{base_sheet}_rank{int(rank_value)}")
         sheet_candidates.append(base_sheet)
 
         sheet = next((candidate for candidate in sheet_candidates if candidate in available), None)

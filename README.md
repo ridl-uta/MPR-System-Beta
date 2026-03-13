@@ -69,6 +69,56 @@ python3 run_main.py \
   --skip-dvfs-apply
 ```
 
+### B1) Dry-run to verify rank-specific performance sheets
+
+Use this when you want to confirm that workbook data is being loaded for each requested rank before submitting any jobs.
+
+Example:
+
+```bash
+python3 run_main.py \
+  --rank xsbenchmpi=2 \
+  --rank xsbenchmpi=4 \
+  --dry-run
+```
+
+What to inspect:
+
+- `Performance data audit:`
+- `Loaded job models:`
+
+Sheet lookup order for each job instance:
+
+1. `base-sheet-rank<rank>`
+2. fallback `base-sheet`
+
+Examples:
+
+- `xsbenchmpi=2` tries `xsbench-rank2`, then `xsbench`
+- `xsbenchmpi=4` tries `xsbench-rank4`, then `xsbench`
+- `comd=2` tries `comd-rank2`, then `comd`
+- `comd=4` tries `comd-rank4`, then `comd`
+
+Interpretation:
+
+- `LOADED` with `xsbench-rank2` or `xsbench-rank4`: rank-specific sheet found
+- `LOADED` with `xsbench`: rank-specific sheet missing, fallback base sheet used
+- `MISSING_SHEET`: neither rank-specific nor fallback sheet exists
+- `MISSING_COLUMNS`: sheet exists but does not contain required columns
+
+For repeated `--rank xsbenchmpi=...` entries, the program creates internal instance keys like `xsbenchmpi#1` and `xsbenchmpi#2` for bookkeeping. That is expected.
+
+If you want to save and inspect the audit output:
+
+```bash
+python3 run_main.py \
+  --rank xsbenchmpi=2 \
+  --rank xsbenchmpi=4 \
+  --dry-run > dryrun.log 2>&1
+
+rg -n "Performance data audit|Loaded job models|LOADED|MISSING_SHEET|MISSING_COLUMNS" dryrun.log
+```
+
 ### C) Real submit + static power input (no live monitor)
 
 ```bash

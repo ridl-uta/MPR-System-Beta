@@ -456,6 +456,8 @@ def print_allocations(
 def fetch_job_perf_data(
     scheduler: JobScheduler,
     job_ranks: dict[str, int],
+    *,
+    strict: bool = True,
 ) -> dict[str, pd.DataFrame]:
     job_perf_data, perf_audit_df = scheduler.get_cached_perf_data(
         job_names=list(job_ranks.keys())
@@ -467,7 +469,7 @@ def fetch_job_perf_data(
         print(perf_audit_df.to_string(index=False))
     print("Loaded job models:", list(job_perf_data.keys()))
 
-    if not job_perf_data:
+    if strict and not job_perf_data:
         raise RuntimeError(
             "No performance data in scheduler cache. "
             "Call submit_job/submit_jobs first (auto_load_perf_data=True) before running MPR."
@@ -1271,7 +1273,11 @@ def main() -> int:
         )
         print_allocations(scheduler, args, submit_df, job_ranks)
 
-        job_perf_data = fetch_job_perf_data(scheduler, job_ranks)
+        job_perf_data = fetch_job_perf_data(
+            scheduler,
+            job_ranks,
+            strict=not args.dry_run,
+        )
         if args.dry_run:
             return 0
         if monitor is not None and overload_event_queue is not None:

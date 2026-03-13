@@ -3,12 +3,14 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+import contextlib
+import io
 
 import pandas as pd
 
 from job_scheduler import JobScheduler
 from job_scheduler.performance_data import load_perf_data_for_jobs
-from run_main import parse_job_args_overrides, parse_job_specs
+from run_main import fetch_job_perf_data, parse_job_args_overrides, parse_job_specs
 
 
 class TestMultiInstanceParsing(unittest.TestCase):
@@ -145,6 +147,65 @@ class TestRankSpecificPerfSheets(unittest.TestCase):
         audit_rows = {str(row["job"]): dict(row) for row in audit_df.to_dict(orient="records")}
         self.assertEqual(audit_rows["xsbenchmpi#1"]["sheet"], "xsbench-rank2")
         self.assertEqual(audit_rows["comd#1"]["sheet"], "comd")
+
+    def test_loader_accepts_underscore_rank_sheet_names(self) -> None:
+        required_df = pd.DataFrame(
+            {
+                "Resource Reduction": [0.1],
+                "Extra Execution": [1.0],
+                "Power": [10.0],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            xlsx_path = Path(tmpdir) / "perf.xlsx"
+            with pd.ExcelWriter(xlsx_path) as writer:
+                required_df.to_excel(writer, sheet_name="xsbench_rank2", index=False)
+                required_df.to_excel(writer, sheet_name="xsbench_rank4", index=False)
+
+            jobs, audit_df = load_perf_data_for_jobs(
+                xlsx_path=xlsx_path,
+                job_names=["xsbenchmpi#1", "xsbenchmpi#2"],
+                sheet_map={
+                    "xsbenchmpi#1": "xsbench",
+                    "xsbenchmpi#2": "xsbench",
+                },
+                job_ranks={
+                    "xsbenchmpi#1": 2,
+                    "xsbenchmpi#2": 4,
+                },
+            )
+
+        self.assertIn("xsbenchmpi#1", jobs)
+        self.assertIn("xsbenchmpi#2", jobs)
+        audit_rows = {str(row["job"]): dict(row) for row in audit_df.to_dict(orient="records")}
+        self.assertEqual(audit_rows["xsbenchmpi#1"]["sheet"], "xsbench_rank2")
+        self.assertEqual(audit_rows["xsbenchmpi#2"]["sheet"], "xsbench_rank4")
+
+
+class TestDryRunPerfAudit(unittest.TestCase):
+    def test_fetch_job_perf_data_non_strict_allows_missing_sheets(self) -> None:
+        scheduler = JobScheduler()
+        scheduler._perf_audit_rows = [
+            {
+                "job": "xsbenchmpi#1",
+                "sheet": "xsbench",
+                "status": "MISSING_SHEET",
+                "details": "xsbench-rank2,xsbench",
+            }
+        ]
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            result = fetch_job_perf_data(
+                scheduler,
+                {"xsbenchmpi#1": 2},
+                strict=False,
+            )
+
+        self.assertEqual(result, {})
+        self.assertIn("Performance data audit:", stdout.getvalue())
+        self.assertIn("MISSING_SHEET", stdout.getvalue())
 
 
 if __name__ == "__main__":
