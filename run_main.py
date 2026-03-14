@@ -866,6 +866,9 @@ def apply_dvfs_with_allocations(
     dvfs_controller = DVFSController(
         ssh_user=args.dvfs_ssh_user,
         verify_tolerance_mhz=float(args.dvfs_verify_tol_mhz),
+        cpufreq_sync=True,
+        cpufreq_governor="userspace",
+        cpufreq_min_khz=1_000_000,
     )
     dvfs_rows: list[dict[str, object]] = []
     used_allocations: dict[str, dict[str, Any]] = {}
