@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Apply GEOPM CPU frequency settings from a host-specific config file.
+# Apply GEOPM core frequency settings from a host-specific config file.
 # Intended to be run via systemd as a oneshot service.
 
 set -euo pipefail
@@ -45,8 +45,9 @@ fi
 # Supported config variables (per config; optional unless noted):
 # - FREQ_HZ: target frequency in Hz; if "max" or empty, use max available.
 # - CORES: space-separated core IDs to target (e.g., "0 2 4 6 8").
-# - CPUS: space-separated logical CPU IDs to target. Ignored if CORES is set.
-# - CONTROL_KIND: AUTO | CORE_MAX | CPU  (default: AUTO)
+# - CPUS: space-separated logical CPU IDs to target. For backward compatibility,
+#         these are mapped to unique core IDs and ignored if CORES is set.
+# - CONTROL_KIND: AUTO | PERF_CTL | CORE_MAX  (default: PERF_CTL)
 # - RESPECT_CPUSET: 1 to limit to process cpuset (default: 0)
 # - RETRIES: write attempts per target (default: 5)
 # - RETRY_SLEEP: seconds between retries (default: 0.25)
@@ -90,6 +91,11 @@ map_core_to_cpus() {
   lscpu -p=CPU,CORE | awk -F, -v k="$core_id" '/^[^#]/ && $2==k {print $1}'
 }
 
+map_cpu_to_core() {
+  local cpu_id="$1"
+  lscpu -p=CPU,CORE | awk -F, -v k="$cpu_id" '/^[^#]/ && $1==k {print $2; exit}'
+}
+
 write_with_retry() {
   local cmd="$1"; shift
   local attempt=1
@@ -112,7 +118,6 @@ apply_block_from_file() {
   # Reset per-config variables/state
   unset FREQ_HZ CORES CPUS CONTROL_KIND RESPECT_CPUSET RETRIES RETRY_SLEEP
   ALLOWED_CPUS=""
-  TARGET_CPUS=()
   TARGET_CORES=()
   applied=0
   failed=0
@@ -122,7 +127,10 @@ apply_block_from_file() {
   source "$conf"
   set +a
 
-  CONTROL_KIND=${CONTROL_KIND:-AUTO}
+  CONTROL_KIND=${CONTROL_KIND:-PERF_CTL}
+  if [[ "$CONTROL_KIND" == "CPU" ]]; then
+    CONTROL_KIND="PERF_CTL"
+  fi
   RESPECT_CPUSET=${RESPECT_CPUSET:-0}
   RETRIES=${RETRIES:-5}
   RETRY_SLEEP=${RETRY_SLEEP:-0.25}
@@ -153,31 +161,52 @@ apply_block_from_file() {
     grep -q "\b${cpu}\b" <<<" ${ALLOWED_CPUS} "
   }
 
+  core_in_allowed() {
+    local core="$1"
+    local cpu
+    [[ -z "$ALLOWED_CPUS" ]] && return 0
+    while read -r cpu; do
+      [[ -z "$cpu" ]] && continue
+      if in_allowed "$cpu"; then
+        return 0
+      fi
+    done < <(map_core_to_cpus "$core")
+    return 1
+  }
+
   # Build target lists
   if [[ -n "${CORES:-}" ]]; then
     local c
-    for c in $CORES; do TARGET_CORES+=("$c"); done
-    for c in "${TARGET_CORES[@]}"; do
-      while read -r cpu; do
-        [[ -z "$cpu" ]] && continue
-        in_allowed "$cpu" || continue
-        TARGET_CPUS+=("$cpu")
-      done < <(map_core_to_cpus "$c")
+    for c in $CORES; do
+      core_in_allowed "$c" || continue
+      TARGET_CORES+=("$c")
     done
   elif [[ -n "${CPUS:-}" ]]; then
     local cpu
+    local core
     for cpu in $CPUS; do
       in_allowed "$cpu" || continue
-      TARGET_CPUS+=("$cpu")
+      core=$(map_cpu_to_core "$cpu")
+      [[ -z "$core" ]] && continue
+      TARGET_CORES+=("$core")
     done
   else
-    while read -r cpu; do
-      in_allowed "$cpu" || continue
-      TARGET_CPUS+=("$cpu")
-    done < <(lscpu -p=CPU | awk -F, '/^[^#]/ {print $1}')
+    while read -r core; do
+      [[ -z "$core" ]] && continue
+      core_in_allowed "$core" || continue
+      TARGET_CORES+=("$core")
+    done < <(lscpu -p=CORE | awk -F, '/^[^#]/ {print $1}' | sort -n | uniq)
   fi
 
+  if (( ${#TARGET_CORES[@]} > 0 )); then
+    mapfile -t TARGET_CORES < <(printf '%s\n' "${TARGET_CORES[@]}" | awk 'NF' | sort -n | uniq)
+  fi
+
+  local has_access_perf_ctl=0
   local has_access_core_max=0
+  if geopmaccess -l 2>/dev/null | grep -q "MSR::PERF_CTL:FREQ.*core"; then
+    has_access_perf_ctl=1
+  fi
   if geopmaccess -l 2>/dev/null | grep -q "CPU_FREQUENCY_MAX_CONTROL.*core"; then
     has_access_core_max=1
   fi
@@ -189,20 +218,28 @@ apply_block_from_file() {
         return 2
       fi
       ;;
-    CPU)
-      if ! apply_cpu_ctrl; then
-        err "CPU CONTROL writes failed"
+    PERF_CTL)
+      if ! apply_perf_ctl; then
+        err "PERF_CTL writes failed"
         return 2
       fi
       ;;
     AUTO|*)
-      if [[ "$has_access_core_max" == "1" && -n "${CORES:-}" ]]; then
-        if apply_core_max; then :; else
-          log "Falling back to CPU domain control"
-          apply_cpu_ctrl || { err "Fallback CPU CONTROL writes failed"; return 2; }
+      if [[ "$has_access_perf_ctl" == "1" ]]; then
+        if apply_perf_ctl; then
+          :
+        elif [[ "$has_access_core_max" == "1" ]]; then
+          log "Falling back to CORE_MAX"
+          apply_core_max || { err "Fallback CORE_MAX writes failed"; return 2; }
+        else
+          err "PERF_CTL writes failed and no CORE_MAX fallback is available"
+          return 2
         fi
+      elif [[ "$has_access_core_max" == "1" ]]; then
+        apply_core_max || { err "CORE_MAX writes failed"; return 2; }
       else
-        apply_cpu_ctrl || { err "CPU CONTROL writes failed"; return 2; }
+        err "Neither MSR::PERF_CTL:FREQ core nor CPU_FREQUENCY_MAX_CONTROL core is available"
+        return 2
       fi
       ;;
   esac
@@ -215,8 +252,7 @@ apply_block_from_file() {
 apply_core_max() {
   local rc=0
   if [[ ${#TARGET_CORES[@]} -eq 0 ]]; then
-    # derive cores from CPUs if not provided
-    mapfile -t TARGET_CORES < <(lscpu -p=CPU,CORE | awk -F, '/^[^#]/{print $2}' | sort -n | uniq)
+    mapfile -t TARGET_CORES < <(lscpu -p=CORE | awk -F, '/^[^#]/{print $1}' | sort -n | uniq)
   fi
   for core in "${TARGET_CORES[@]}"; do
     if write_with_retry geopmwrite CPU_FREQUENCY_MAX_CONTROL core "$core" "$FREQ_HZ"; then
@@ -231,17 +267,17 @@ apply_core_max() {
   return $rc
 }
 
-apply_cpu_ctrl() {
+apply_perf_ctl() {
   local rc=0
-  if [[ ${#TARGET_CPUS[@]} -eq 0 ]]; then
-    mapfile -t TARGET_CPUS < <(lscpu -p=CPU | awk -F, '/^[^#]/{print $1}')
+  if [[ ${#TARGET_CORES[@]} -eq 0 ]]; then
+    mapfile -t TARGET_CORES < <(lscpu -p=CORE | awk -F, '/^[^#]/{print $1}' | sort -n | uniq)
   fi
-  for cpu in "${TARGET_CPUS[@]}"; do
-    if write_with_retry geopmwrite CPU_FREQUENCY_CONTROL cpu "$cpu" "$FREQ_HZ"; then
-      log "cpu ${cpu}: CONTROL=${FREQ_HZ}"
+  for core in "${TARGET_CORES[@]}"; do
+    if write_with_retry geopmwrite MSR::PERF_CTL:FREQ core "$core" "$FREQ_HZ"; then
+      log "core ${core}: PERF_CTL:FREQ=${FREQ_HZ}"
       applied=$((applied+1))
     else
-      err "cpu ${cpu}: write CONTROL failed"
+      err "core ${core}: write PERF_CTL:FREQ failed"
       rc=1
       failed=$((failed+1))
     fi

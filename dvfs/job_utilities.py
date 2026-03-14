@@ -321,7 +321,7 @@ def apply_reduction(
                 "### RULE dvfs-manager\n"
                 f"FREQ_HZ={freq_hz:.0f}\n"
                 f"CORES=\"{core_list}\"\n"
-                "CONTROL_KIND=CORE_MAX\n"
+                "CONTROL_KIND=PERF_CTL\n"
             )
             conf_path.write_text(body, encoding="ascii")
             print(

@@ -99,6 +99,17 @@ class TestCpuToCoreMapping(unittest.TestCase):
 
 
 class TestDvfsVerification(unittest.TestCase):
+    def test_readback_parses_perf_ctl_signal_names(self) -> None:
+        stdout = "GEOPMREAD MSR::PERF_CTL:FREQ core 0 1.4e+09"
+        values, source, signal, reason = DVFSController._extract_readback_values(
+            stdout,
+            target_indices=[0],
+        )
+        self.assertEqual(values, [1400.0])
+        self.assertEqual(source, "geopmread")
+        self.assertEqual(signal, "MSR::PERF_CTL:FREQ")
+        self.assertEqual(reason, "ok")
+
     def test_readback_uses_only_matching_target_ids(self) -> None:
         stdout = "\n".join(
             [

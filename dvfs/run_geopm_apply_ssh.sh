@@ -193,23 +193,15 @@ build_remote_cmd() {
     echo "=== $(date '+%H:%M:%S') ==="
     if command -v geopmread >/dev/null 2>&1; then
       core_ids=$(lscpu -p=CORE 2>/dev/null | awk -F, '/^[^#]/ {print $1}' | sort -n | uniq)
-      cpu_ids=$(lscpu -p=CPU 2>/dev/null | awk -F, '/^[^#]/ {print $1}' | sort -n | uniq)
-      for signal in CPU_FREQUENCY_MAX_CONTROL CPU_FREQUENCY_CONTROL CPU_FREQUENCY_STATUS; do
-        for domain in core cpu; do
-          if [ "$domain" = "core" ]; then
-            ids="$core_ids"
-          else
-            ids="$cpu_ids"
-          fi
-          for idx in $ids; do
-            value=$(geopmread "$signal" "$domain" "$idx" 2>/dev/null || true)
-            case "$value" in
-              ""|NaN|nan|NAN)
-                continue
-                ;;
-            esac
-            printf "GEOPMREAD %s %s %s %s\n" "$signal" "$domain" "$idx" "$value"
-          done
+      for signal in MSR::PERF_CTL:FREQ CPU_FREQUENCY_CONTROL CPU_FREQUENCY_MAX_CONTROL CPU_FREQUENCY_STATUS; do
+        for idx in $core_ids; do
+          value=$(geopmread "$signal" core "$idx" 2>/dev/null || true)
+          case "$value" in
+            ""|NaN|nan|NAN)
+              continue
+              ;;
+          esac
+          printf "GEOPMREAD %s core %s %s\n" "$signal" "$idx" "$value"
         done
       done
     fi

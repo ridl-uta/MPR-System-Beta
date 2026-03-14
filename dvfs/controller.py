@@ -18,7 +18,7 @@ class DVFSController:
         flags=re.IGNORECASE,
     )
     _GEOPMREAD_RE = re.compile(
-        r"^GEOPMREAD\s+([A-Z0-9_]+)\s+(core|cpu)\s+([0-9]+)\s+([-+0-9.eE]+)\s*$",
+        r"^GEOPMREAD\s+([A-Z0-9_:]+)\s+(core|cpu)\s+([0-9]+)\s+([-+0-9.eE]+)\s*$",
         flags=re.IGNORECASE,
     )
 
@@ -27,7 +27,7 @@ class DVFSController:
         *,
         helper_script_path: str | Path | None = None,
         conf_dir: str | Path = _DEFAULT_CONF_DIR,
-        control_kind: str = "CORE_MAX",
+        control_kind: str = "PERF_CTL",
         ssh_user: str | None = None,
         ssh_identity: str | None = None,
         no_sudo: bool = False,
@@ -43,6 +43,8 @@ class DVFSController:
         )
         self.conf_dir = Path(conf_dir)
         self.control_kind = str(control_kind).upper()
+        if self.control_kind == "CPU":
+            self.control_kind = "PERF_CTL"
         self.ssh_user = ssh_user
         self.ssh_identity = ssh_identity
         self.no_sudo = bool(no_sudo)
@@ -51,8 +53,8 @@ class DVFSController:
         self.concurrency = int(concurrency)
         self.verify_tolerance_mhz = float(verify_tolerance_mhz)
 
-        if self.control_kind not in {"AUTO", "CORE_MAX", "CPU"}:
-            raise ValueError("control_kind must be one of: AUTO, CORE_MAX, CPU")
+        if self.control_kind not in {"AUTO", "CORE_MAX", "PERF_CTL"}:
+            raise ValueError("control_kind must be one of: AUTO, CORE_MAX, PERF_CTL")
         if self.concurrency <= 0:
             raise ValueError("concurrency must be > 0")
         if self.verify_tolerance_mhz < 0:
@@ -256,8 +258,9 @@ class DVFSController:
             )
 
         signal_priority = (
-            "CPU_FREQUENCY_MAX_CONTROL",
+            "MSR::PERF_CTL:FREQ",
             "CPU_FREQUENCY_CONTROL",
+            "CPU_FREQUENCY_MAX_CONTROL",
             "CPU_FREQUENCY_STATUS",
         )
         for signal_name in signal_priority:

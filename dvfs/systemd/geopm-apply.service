@@ -1,5 +1,5 @@
 [Unit]
-Description=Apply GEOPM CPU frequency settings from host config
+Description=Apply GEOPM core frequency settings from host config
 Wants=geopmd.service
 After=network.target geopmd.service
 
@@ -12,4 +12,3 @@ IOSchedulingClass=best-effort
 
 [Install]
 WantedBy=multi-user.target
-
