@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
 from dvfs.controller import DVFSController
 from dvfs.job_utilities import (
@@ -99,6 +101,28 @@ class TestCpuToCoreMapping(unittest.TestCase):
 
 
 class TestDvfsVerification(unittest.TestCase):
+    def test_controller_writes_cpufreq_sync_config_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controller = DVFSController(
+                conf_dir=tmpdir,
+                control_kind="PERF_CTL",
+                cpufreq_sync=True,
+                cpufreq_governor="userspace",
+                cpufreq_min_khz=1_000_000,
+            )
+            conf_path = controller._write_host_config(
+                node_name="ridlserver04",
+                core_numbers=[2, 6],
+                frequency_hz=1_600_000_000,
+            )
+            body = Path(conf_path).read_text(encoding="ascii")
+            self.assertIn("FREQ_HZ=1600000000", body)
+            self.assertIn("CONTROL_KIND=PERF_CTL", body)
+            self.assertIn("CPUFREQ_SYNC=1", body)
+            self.assertIn("CPUFREQ_GOVERNOR=userspace", body)
+            self.assertIn("CPUFREQ_MIN_KHZ=1000000", body)
+            self.assertIn('CORES="2 6"', body)
+
     def test_readback_parses_perf_ctl_signal_names(self) -> None:
         stdout = "GEOPMREAD MSR::PERF_CTL:FREQ core 0 1.4e+09"
         values, source, signal, reason = DVFSController._extract_readback_values(

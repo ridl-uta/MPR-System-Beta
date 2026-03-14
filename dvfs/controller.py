@@ -28,6 +28,9 @@ class DVFSController:
         helper_script_path: str | Path | None = None,
         conf_dir: str | Path = _DEFAULT_CONF_DIR,
         control_kind: str = "PERF_CTL",
+        cpufreq_sync: bool = False,
+        cpufreq_governor: str = "userspace",
+        cpufreq_min_khz: int = 1_000_000,
         ssh_user: str | None = None,
         ssh_identity: str | None = None,
         no_sudo: bool = False,
@@ -45,6 +48,9 @@ class DVFSController:
         self.control_kind = str(control_kind).upper()
         if self.control_kind == "CPU":
             self.control_kind = "PERF_CTL"
+        self.cpufreq_sync = bool(cpufreq_sync)
+        self.cpufreq_governor = str(cpufreq_governor)
+        self.cpufreq_min_khz = int(cpufreq_min_khz)
         self.ssh_user = ssh_user
         self.ssh_identity = ssh_identity
         self.no_sudo = bool(no_sudo)
@@ -55,6 +61,10 @@ class DVFSController:
 
         if self.control_kind not in {"AUTO", "CORE_MAX", "PERF_CTL"}:
             raise ValueError("control_kind must be one of: AUTO, CORE_MAX, PERF_CTL")
+        if not self.cpufreq_governor:
+            raise ValueError("cpufreq_governor must be non-empty")
+        if self.cpufreq_min_khz <= 0:
+            raise ValueError("cpufreq_min_khz must be > 0")
         if self.concurrency <= 0:
             raise ValueError("concurrency must be > 0")
         if self.verify_tolerance_mhz < 0:
@@ -146,6 +156,14 @@ class DVFSController:
             f"FREQ_HZ={int(frequency_hz)}",
             f"CONTROL_KIND={self.control_kind}",
         ]
+        if self.cpufreq_sync:
+            lines.extend(
+                [
+                    "CPUFREQ_SYNC=1",
+                    f"CPUFREQ_GOVERNOR={self.cpufreq_governor}",
+                    f"CPUFREQ_MIN_KHZ={self.cpufreq_min_khz}",
+                ]
+            )
         if core_numbers:
             lines.append(f'CORES="{" ".join(str(c) for c in core_numbers)}"')
         lines.append("")
@@ -433,6 +451,9 @@ class DVFSController:
                     "frequency_hz": int(frequency_hz),
                     "frequency_mhz": float(frequency_hz) / 1e6,
                     "control_kind": self.control_kind,
+                    "cpufreq_sync": self.cpufreq_sync,
+                    "cpufreq_governor": self.cpufreq_governor,
+                    "cpufreq_min_khz": self.cpufreq_min_khz,
                     "config_path": str(conf_path),
                     "status": apply_result["status"],
                     "run_target": apply_result["run_target"],
