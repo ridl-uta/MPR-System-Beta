@@ -322,6 +322,7 @@ def apply_reduction(
                 f"FREQ_HZ={freq_hz:.0f}\n"
                 f"CORES=\"{core_list}\"\n"
                 "CONTROL_KIND=PERF_CTL\n"
+                "CPUFREQ_SYNC=1\n"
             )
             conf_path.write_text(body, encoding="ascii")
             print(

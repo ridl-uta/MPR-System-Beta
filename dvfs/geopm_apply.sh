@@ -48,6 +48,11 @@ fi
 # - CPUS: space-separated logical CPU IDs to target. For backward compatibility,
 #         these are mapped to unique core IDs and ignored if CORES is set.
 # - CONTROL_KIND: AUTO | PERF_CTL | CORE_MAX  (default: PERF_CTL)
+# - CPUFREQ_SYNC: 1 to align kernel cpufreq policy with FREQ_HZ on targeted
+#                 cores before GEOPM writes (default: 0)
+# - CPUFREQ_GOVERNOR: governor used when CPUFREQ_SYNC=1 (default: userspace)
+# - CPUFREQ_MIN_KHZ: minimum cpufreq policy floor when CPUFREQ_SYNC=1
+#                    (default: 1000000)
 # - RESPECT_CPUSET: 1 to limit to process cpuset (default: 0)
 # - RETRIES: write attempts per target (default: 5)
 # - RETRY_SLEEP: seconds between retries (default: 0.25)
@@ -111,12 +116,129 @@ write_with_retry() {
   done
 }
 
+sysfs_write() {
+  local path="$1" value="$2"
+  printf '%s\n' "$value" > "$path"
+}
+
+hz_to_khz() {
+  local hz="$1"
+  awk -v hz="$hz" 'BEGIN{printf "%.0f", hz/1000}'
+}
+
+read_cpu_list_file() {
+  local path="$1" raw
+  raw=$(tr -s '[:space:]' ',' < "$path")
+  raw=${raw#,}
+  raw=${raw%,}
+  [[ -n "${raw:-}" ]] || return 0
+  expand_list "$raw"
+}
+
+sync_cpufreq_policy() {
+  local target_khz policy_min_khz policy_path policy_name
+  local target_cpus=""
+  local core cpu current_min current_max extra_cpus
+  local selected=0 rc=0
+
+  if [[ ${#TARGET_CORES[@]} -eq 0 ]]; then
+    mapfile -t TARGET_CORES < <(lscpu -p=CORE | awk -F, '/^[^#]/{print $1}' | sort -n | uniq)
+  fi
+
+  for core in "${TARGET_CORES[@]}"; do
+    while read -r cpu; do
+      [[ -z "$cpu" ]] && continue
+      target_cpus+="${cpu} "
+    done < <(map_core_to_cpus "$core")
+  done
+
+  [[ -n "${target_cpus:-}" ]] || return 0
+
+  target_khz=$(hz_to_khz "$FREQ_HZ")
+  policy_min_khz="$CPUFREQ_MIN_KHZ"
+  if (( policy_min_khz > target_khz )); then
+    policy_min_khz="$target_khz"
+  fi
+  for policy_path in /sys/devices/system/cpu/cpufreq/policy*; do
+    [[ -d "$policy_path" && -r "$policy_path/affected_cpus" ]] || continue
+
+    selected=0
+    while read -r cpu; do
+      [[ -z "$cpu" ]] && continue
+      if grep -q "\b${cpu}\b" <<<" ${target_cpus} "; then
+        selected=1
+        break
+      fi
+    done < <(read_cpu_list_file "$policy_path/affected_cpus")
+
+    [[ "$selected" == "1" ]] || continue
+
+    policy_name=$(basename "$policy_path")
+    extra_cpus=""
+    while read -r cpu; do
+      [[ -z "$cpu" ]] && continue
+      if ! grep -q "\b${cpu}\b" <<<" ${target_cpus} "; then
+        extra_cpus+="${cpu} "
+      fi
+    done < <(read_cpu_list_file "$policy_path/affected_cpus")
+    if [[ -n "${extra_cpus:-}" ]]; then
+      log "policy ${policy_name}: target expands to CPUs ${extra_cpus}"
+    fi
+
+    if [[ -e "$policy_path/scaling_governor" ]]; then
+      if ! write_with_retry sysfs_write "$policy_path/scaling_governor" "$CPUFREQ_GOVERNOR"; then
+        err "policy ${policy_name}: failed to set governor=${CPUFREQ_GOVERNOR}"
+        rc=1
+        continue
+      fi
+    fi
+
+    current_min=$(cat "$policy_path/scaling_min_freq")
+    current_max=$(cat "$policy_path/scaling_max_freq")
+    if (( target_khz >= current_max )); then
+      if ! write_with_retry sysfs_write "$policy_path/scaling_max_freq" "$target_khz"; then
+        err "policy ${policy_name}: failed to set scaling_max_freq=${target_khz}"
+        rc=1
+        continue
+      fi
+      if ! write_with_retry sysfs_write "$policy_path/scaling_min_freq" "$policy_min_khz"; then
+        err "policy ${policy_name}: failed to set scaling_min_freq=${policy_min_khz}"
+        rc=1
+        continue
+      fi
+    else
+      if ! write_with_retry sysfs_write "$policy_path/scaling_min_freq" "$policy_min_khz"; then
+        err "policy ${policy_name}: failed to set scaling_min_freq=${policy_min_khz}"
+        rc=1
+        continue
+      fi
+      if ! write_with_retry sysfs_write "$policy_path/scaling_max_freq" "$target_khz"; then
+        err "policy ${policy_name}: failed to set scaling_max_freq=${target_khz}"
+        rc=1
+        continue
+      fi
+    fi
+
+    if [[ -e "$policy_path/scaling_setspeed" ]]; then
+      if ! write_with_retry sysfs_write "$policy_path/scaling_setspeed" "$target_khz"; then
+        err "policy ${policy_name}: failed to set scaling_setspeed=${target_khz}"
+        rc=1
+        continue
+      fi
+    fi
+
+    log "policy ${policy_name}: governor=${CPUFREQ_GOVERNOR} min_khz=${policy_min_khz} max_khz=${target_khz}"
+  done
+
+  return $rc
+}
+
 # Helper: apply a single block config from file (contains FREQ_HZ/CORES/CPUS/etc.)
 apply_block_from_file() {
   local conf="$1"
 
   # Reset per-config variables/state
-  unset FREQ_HZ CORES CPUS CONTROL_KIND RESPECT_CPUSET RETRIES RETRY_SLEEP
+  unset FREQ_HZ CORES CPUS CONTROL_KIND CPUFREQ_SYNC CPUFREQ_GOVERNOR CPUFREQ_MIN_KHZ RESPECT_CPUSET RETRIES RETRY_SLEEP
   ALLOWED_CPUS=""
   TARGET_CORES=()
   applied=0
@@ -131,6 +253,9 @@ apply_block_from_file() {
   if [[ "$CONTROL_KIND" == "CPU" ]]; then
     CONTROL_KIND="PERF_CTL"
   fi
+  CPUFREQ_SYNC=${CPUFREQ_SYNC:-0}
+  CPUFREQ_GOVERNOR=${CPUFREQ_GOVERNOR:-userspace}
+  CPUFREQ_MIN_KHZ=${CPUFREQ_MIN_KHZ:-1000000}
   RESPECT_CPUSET=${RESPECT_CPUSET:-0}
   RETRIES=${RETRIES:-5}
   RETRY_SLEEP=${RETRY_SLEEP:-0.25}
@@ -200,6 +325,10 @@ apply_block_from_file() {
 
   if (( ${#TARGET_CORES[@]} > 0 )); then
     mapfile -t TARGET_CORES < <(printf '%s\n' "${TARGET_CORES[@]}" | awk 'NF' | sort -n | uniq)
+  fi
+
+  if [[ "$CPUFREQ_SYNC" == "1" ]]; then
+    sync_cpufreq_policy || { err "CPUFreq policy sync failed"; return 2; }
   fi
 
   local has_access_perf_ctl=0
