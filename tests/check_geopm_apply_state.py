@@ -17,6 +17,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 import time
@@ -123,6 +124,20 @@ def geopmread_mhz(signal: str, core: int) -> float:
     if value >= 1e5:
         return value / 1e3
     return value
+
+
+def journal_has_core_log(journal: str, *, core: int, log_token: str, target_hz: float) -> bool:
+    pattern = re.compile(
+        rf"core\s+{core}:\s+{re.escape(log_token)}=([0-9.eE+-]+)"
+    )
+    for match in pattern.finditer(journal):
+        try:
+            logged_hz = float(match.group(1))
+        except ValueError:
+            continue
+        if abs(logged_hz - target_hz) <= 0.5:
+            return True
+    return False
 
 
 def get_target_policies(target_cpus: set[int]) -> Dict[str, List[int]]:
@@ -306,11 +321,11 @@ def main() -> int:
         if expected_policy_log not in journal:
             failures.append(f"journal missing: {expected_policy_log}")
 
-    expected_freq_hz_text = f"{int(round(args.freq_hz))}"
     for core in cores:
-        expected_core_log = f"core {core}: {log_token}={expected_freq_hz_text}"
-        if expected_core_log not in journal:
-            failures.append(f"journal missing: {expected_core_log}")
+        if not journal_has_core_log(journal, core=core, log_token=log_token, target_hz=args.freq_hz):
+            failures.append(
+                f"journal missing numeric match for: core {core}: {log_token}=<target {args.freq_hz:.0f} Hz>"
+            )
 
     for sample_idx in range(args.samples):
         print(f"Sample {sample_idx + 1}/{args.samples}")
