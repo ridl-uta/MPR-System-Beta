@@ -65,7 +65,9 @@ class MainController:
         self.record_nodelist = record_nodelist
         self.record_exclude = record_exclude
         self.record_dry_run = record_dry_run
-        self.record_interval_mhz = max(1, int(record_interval_mhz))
+        self.record_interval_mhz = int(record_interval_mhz)
+        if self.record_interval_mhz <= 0:
+            raise ValueError("record_interval_mhz must be > 0")
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -298,11 +300,15 @@ class MainController:
         return {
             "job_id": job_id,
             "cmd": cmd,
-            "freq_mhz": freq_mhz,
+            "freq_mhz": None,
+            "requested_freq_mhz": freq_mhz,
+            "applied_freq_mhz": None,
             "reduction": reduction,
             "submitted_at": datetime.now(timezone.utc),
             "start_time": None,
             "dvfs_applied": False,
+            "dvfs_apply_status": "PENDING",
+            "dvfs_apply_error": None,
         }
 
     def _update_running_jobs(self, running_jobs: Dict[str, dict]) -> List[dict]:
@@ -326,6 +332,10 @@ class MainController:
                     try:
                         self.dvfs_manager.submit_reduction(job_id, entry["reduction"])
                         entry["dvfs_applied"] = True
+                        entry["freq_mhz"] = entry.get("requested_freq_mhz")
+                        entry["applied_freq_mhz"] = entry.get("requested_freq_mhz")
+                        entry["dvfs_apply_status"] = "APPLIED"
+                        entry["dvfs_apply_error"] = None
                         entry["start_time"] = datetime.now(timezone.utc)
                         logging.info(
                             "[Record] Applied reduction %.3f to job %s",
@@ -333,6 +343,8 @@ class MainController:
                             job_id,
                         )
                     except Exception as exc:
+                        entry["dvfs_apply_status"] = "FAILED"
+                        entry["dvfs_apply_error"] = str(exc)
                         logging.error("[Record] Failed to apply reduction for job %s: %s", job_id, exc)
             elif state in terminal_states:
                 record = self._finalize_record(entry)
@@ -388,6 +400,8 @@ class MainController:
         job_id = entry.get("job_id")
         start_time = entry.get("start_time") or entry.get("submitted_at") or datetime.now(timezone.utc)
         end_time = datetime.now(timezone.utc)
+        requested_freq_mhz = entry.get("requested_freq_mhz")
+        applied_freq_mhz = entry.get("applied_freq_mhz")
         freq_mhz = entry.get("freq_mhz")
         reduction = entry.get("reduction")
         node_list: Optional[str] = None
@@ -419,12 +433,16 @@ class MainController:
             "job_id": job_id,
             "job_name": entry.get("cmd", [])[-1] if entry.get("cmd") else None,
             "freq_mhz": freq_mhz,
+            "requested_freq_mhz": requested_freq_mhz,
+            "applied_freq_mhz": applied_freq_mhz,
             "reduction": reduction,
             "start": start_time,
             "end": end_time,
             "duration_s": (end_time - start_time).total_seconds(),
             "avg_power_w": avg_power,
             "net_avg_power_w": net_power,
+            "dvfs_apply_status": entry.get("dvfs_apply_status"),
+            "dvfs_apply_error": entry.get("dvfs_apply_error"),
         }
         if node_list:
             record["nodes"] = node_list
@@ -433,12 +451,14 @@ class MainController:
         if self.idle_power_baseline:
             record["idle_power_w"] = dict(self.idle_power_baseline)
 
+        freq_text = f"{freq_mhz:.1f}MHz" if isinstance(freq_mhz, (int, float)) else "not-applied"
         logging.info(
-            "[Record] Job %s freq=%.1fMHz duration=%.1fs avg_power=%s",
+            "[Record] Job %s freq=%s duration=%.1fs avg_power=%s dvfs_status=%s",
             job_id,
-            freq_mhz,
+            freq_text,
             record["duration_s"],
             avg_power,
+            record["dvfs_apply_status"],
         )
 
         self._performance_results.append(record)
@@ -714,26 +734,58 @@ class MainController:
         return None
 
     def _cores_required_from_cmd(self, cmd: list[str]) -> int:
-        ntasks = 1
+        ntasks: Optional[int] = None
         cpus_per_task = 1
-        nodes = 1
-        for arg in cmd:
-            if arg.startswith("--nodes="):
+        nodes: Optional[int] = None
+
+        idx = 0
+        while idx < len(cmd):
+            arg = cmd[idx]
+            next_arg = cmd[idx + 1] if idx + 1 < len(cmd) else None
+
+            def _parse_int(value: str | None) -> int | None:
+                if value is None:
+                    return None
                 try:
-                    nodes = int(arg.split("=", 1)[1])
+                    return int(value)
                 except ValueError:
-                    continue
+                    return None
+
+            parsed: int | None = None
+            consumed_next = False
+
+            if arg in {"-N", "--nodes"}:
+                parsed = _parse_int(next_arg)
+                consumed_next = parsed is not None
+                if parsed is not None:
+                    nodes = parsed
+            elif arg.startswith("--nodes="):
+                parsed = _parse_int(arg.split("=", 1)[1])
+                if parsed is not None:
+                    nodes = parsed
+            elif arg in {"-n", "--ntasks"}:
+                parsed = _parse_int(next_arg)
+                consumed_next = parsed is not None
+                if parsed is not None:
+                    ntasks = parsed
             elif arg.startswith("--ntasks="):
-                try:
-                    ntasks = int(arg.split("=", 1)[1])
-                except ValueError:
-                    continue
+                parsed = _parse_int(arg.split("=", 1)[1])
+                if parsed is not None:
+                    ntasks = parsed
+            elif arg in {"-c", "--cpus-per-task"}:
+                parsed = _parse_int(next_arg)
+                consumed_next = parsed is not None
+                if parsed is not None:
+                    cpus_per_task = parsed
             elif arg.startswith("--cpus-per-task="):
-                try:
-                    cpus_per_task = int(arg.split("=", 1)[1])
-                except ValueError:
-                    continue
-        return max(1, nodes * ntasks * cpus_per_task)
+                parsed = _parse_int(arg.split("=", 1)[1])
+                if parsed is not None:
+                    cpus_per_task = parsed
+
+            idx += 2 if consumed_next else 1
+
+        total_tasks = ntasks if ntasks is not None else (nodes if nodes is not None else 1)
+        return max(1, total_tasks * cpus_per_task)
 
 # ---------------------------------------------------------------------------
 # CLI helpers
@@ -984,6 +1036,8 @@ def _install_signal_handlers(controller: MainController) -> None:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
+    if args.record_interval_mhz <= 0:
+        parser.error("--record-interval-mhz must be > 0")
 
     logging.basicConfig(
         level=getattr(logging, str(args.log_level).upper(), logging.INFO),
