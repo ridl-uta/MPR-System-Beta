@@ -240,7 +240,7 @@ def apply_reduction(
     reduction: float,
     *,
     geopmwrite_cmd: str = "geopmwrite",
-    signal: str = "CPU_FREQUENCY_MAX_CONTROL",
+    signal: str = "MSR::PERF_CTL:FREQ",
     domain: str = "core",
     dry_run: bool = False,
     max_freq_mhz: float = MAX_FREQ_MHZ_DEFAULT,
@@ -280,7 +280,10 @@ def apply_reduction(
                 "### RULE dvfs-manager\n"
                 f"FREQ_HZ={freq_hz:.0f}\n"
                 f"CORES=\"{core_list}\"\n"
-                "CONTROL_KIND=CORE_MAX\n"
+                "CONTROL_KIND=PERF_CTL\n"
+                "CPUFREQ_SYNC=1\n"
+                "CPUFREQ_GOVERNOR=userspace\n"
+                "CPUFREQ_MIN_KHZ=1000000\n"
             )
             conf_path.write_text(body, encoding="ascii")
             print(
