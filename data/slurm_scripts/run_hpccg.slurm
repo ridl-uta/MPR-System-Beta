@@ -29,7 +29,7 @@ cd "$WORKDIR"
 # Launch HPCCG with the configured grid dimensions. Allow MPI_IFACE override.
 for ((job_repeat_iter=1; job_repeat_iter<=JOB_REPEAT; job_repeat_iter++)); do
   echo "[INFO] JOB_REPEAT iteration ${job_repeat_iter}/${JOB_REPEAT}"
-  srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores ./test_HPCCG_mpi "$NX" "$NY" "$NZ"
+  srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores ./test_HPCCG "$NX" "$NY" "$NZ"
   status=$?
   if [[ "$status" -ne 0 ]]; then
     exit "$status"
