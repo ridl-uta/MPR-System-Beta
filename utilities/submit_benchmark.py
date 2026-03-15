@@ -148,6 +148,29 @@ def read_benchmark_args_row(table: Path, ranks: int) -> str | None:
     return None
 
 
+def parse_submit_env(entries: list[str] | None) -> dict[str, str]:
+    env_vars: dict[str, str] = {}
+    for entry in entries or []:
+        if "=" not in entry:
+            raise SystemExit(f"Invalid --submit-env value '{entry}': expected KEY=VALUE")
+        key, value = entry.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise SystemExit(f"Invalid --submit-env value '{entry}': key must not be empty")
+        env_vars[key] = value
+    return env_vars
+
+
+def build_export_str(
+    base_env: dict[str, str],
+    extra_env: dict[str, str] | None = None,
+) -> str:
+    env_exports = dict(base_env)
+    if extra_env:
+        env_exports.update(extra_env)
+    return ",".join(f"{k}={v}" for k, v in env_exports.items())
+
+
 def build_sbatch_wrap(
     *,
     nodes: int,
@@ -164,13 +187,14 @@ def build_sbatch_wrap(
     workdir: str | None,
     size: str,
     lookups: int,
+    extra_env: dict[str, str] | None = None,
 ) -> list[str]:
     env_exports = {
         "OMP_NUM_THREADS": str(cpus_per_task),
         "OMP_PROC_BIND": "close",
         "OMP_PLACES": "cores",
     }
-    export_str = ",".join(f"{k}={v}" for k, v in env_exports.items())
+    export_str = build_export_str(env_exports, extra_env)
 
     # If a workdir is provided, use it; otherwise default to an env override
     # with a sane fallback to /shared/bin so the wrap is robust when WORKDIR
@@ -225,6 +249,7 @@ def build_sbatch_script(
     script_path: str,
     env_vars: dict[str, str],
     script_args: list[str] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> list[str]:
     env_exports = {
         "OMP_NUM_THREADS": str(cpus_per_task),
@@ -233,7 +258,7 @@ def build_sbatch_script(
     }
     for key, value in env_vars.items():
         env_exports[key] = value
-    export_str = ",".join(f"{k}={v}" for k, v in env_exports.items())
+    export_str = build_export_str(env_exports, extra_env)
 
     cmd = [
         "sbatch",
@@ -280,13 +305,14 @@ def build_sbatch_wrap_hpccg(
     nx: int,
     ny: int,
     nz: int,
+    extra_env: dict[str, str] | None = None,
 ) -> list[str]:
     env_exports = {
         "OMP_NUM_THREADS": str(cpus_per_task),
         "OMP_PROC_BIND": "close",
         "OMP_PLACES": "cores",
     }
-    export_str = ",".join(f"{k}={v}" for k, v in env_exports.items())
+    export_str = build_export_str(env_exports, extra_env)
     cd_prefix = (
         f"cd {shlex.quote(workdir)}; " if workdir else "cd ${WORKDIR:-/shared/src/HPCCG}; "
     )
@@ -340,13 +366,14 @@ def build_sbatch_wrap_hpcg(
     nx: int,
     ny: int,
     nz: int,
+    extra_env: dict[str, str] | None = None,
 ) -> list[str]:
     env_exports = {
         "OMP_NUM_THREADS": str(cpus_per_task),
         "OMP_PROC_BIND": "close",
         "OMP_PLACES": "cores",
     }
-    export_str = ",".join(f"{k}={v}" for k, v in env_exports.items())
+    export_str = build_export_str(env_exports, extra_env)
     cd_prefix = (
         f"cd {shlex.quote(workdir)}; " if workdir else "cd ${WORKDIR:-/shared/src/hpcg/hpcg-3.1/build_mpi_omp/bin}; "
     )
@@ -400,13 +427,14 @@ def build_sbatch_wrap_minife(
     nx: int,
     ny: int,
     nz: int,
+    extra_env: dict[str, str] | None = None,
 ) -> list[str]:
     env_exports = {
         "OMP_NUM_THREADS": str(cpus_per_task),
         "OMP_PROC_BIND": "close",
         "OMP_PLACES": "cores",
     }
-    export_str = ",".join(f"{k}={v}" for k, v in env_exports.items())
+    export_str = build_export_str(env_exports, extra_env)
     cd_prefix = (
         f"cd {shlex.quote(workdir)}; " if workdir else "cd ${WORKDIR:-/shared/src/miniFE/ref/src}; "
     )
@@ -458,13 +486,14 @@ def build_sbatch_wrap_minimd(
     bench_bin: str,
     workdir: str | None,
     minimd_args: list[str],
+    extra_env: dict[str, str] | None = None,
 ) -> list[str]:
     env_exports = {
         "OMP_NUM_THREADS": str(cpus_per_task),
         "OMP_PROC_BIND": "close",
         "OMP_PLACES": "cores",
     }
-    export_str = ",".join(f"{k}={v}" for k, v in env_exports.items())
+    export_str = build_export_str(env_exports, extra_env)
     cd_prefix = (
         f"cd {shlex.quote(workdir)}; " if workdir else "cd ${WORKDIR:-/shared/src/miniMD/ref}; "
     )
@@ -517,13 +546,14 @@ def build_sbatch_wrap_comd(
     bench_bin: str,
     workdir: str | None,
     comd_args: list[str],
+    extra_env: dict[str, str] | None = None,
 ) -> list[str]:
     env_exports = {
         "OMP_NUM_THREADS": str(cpus_per_task),
         "OMP_PROC_BIND": "close",
         "OMP_PLACES": "cores",
     }
-    export_str = ",".join(f"{k}={v}" for k, v in env_exports.items())
+    export_str = build_export_str(env_exports, extra_env)
     cd_prefix = (
         f"cd {shlex.quote(workdir)}; " if workdir else "cd ${WORKDIR:-/shared/src/CoMD}; "
     )
@@ -600,11 +630,19 @@ def main() -> int:
     )
     ap.add_argument("--bin", dest="bench_bin", default="./XSBenchMPI", help="Path to benchmark binary (default ./XSBenchMPI)")
     ap.add_argument("--workdir", default=None, help="Working directory to cd before running (optional)")
+    ap.add_argument(
+        "--submit-env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Extra environment variable to export into the Slurm job; repeatable",
+    )
     ap.add_argument("--dry-run", action="store_true", help="Print sbatch command without executing")
     ap.add_argument("--script", default=None, help="Submit the specified Slurm script instead of using --wrap srun")
     args = ap.parse_args()
 
     table = Path(args.table)
+    extra_env = parse_submit_env(args.submit_env)
     table_type = (
         detect_table_type(table, args.script)
         if args.table_type == "auto"
@@ -627,6 +665,7 @@ def main() -> int:
                 env_vars["MPI_IFACE"] = args.mpi_iface
             if args.workdir:
                 env_vars["WORKDIR"] = args.workdir
+            env_vars.update(extra_env)
             cmd = build_sbatch_script(
                 nodes=args.nodes,
                 ranks=args.ranks,
@@ -639,6 +678,7 @@ def main() -> int:
                 ntasks_per_node=args.ntasks_per_node,
                 script_path=args.script,
                 env_vars=env_vars,
+                extra_env=extra_env,
             )
         else:
             if args.bench_bin == "./XSBenchMPI":
@@ -670,6 +710,7 @@ def main() -> int:
                 nx=nx,
                 ny=ny,
                 nz=nz,
+                extra_env=extra_env,
             )
     elif table_type in {"minimd", "comd"}:
         default_bench_args = "-i in.lj.miniMD" if table_type == "minimd" else "-x 40 -y 40 -z 40 -N 1000"
@@ -690,6 +731,7 @@ def main() -> int:
             if args.bench_bin and args.bench_bin != "./XSBenchMPI":
                 bin_env_key = "MINIMD_BIN" if table_type == "minimd" else "COMD_BIN"
                 env_vars[bin_env_key] = args.bench_bin
+            env_vars.update(extra_env)
             cmd = build_sbatch_script(
                 nodes=args.nodes,
                 ranks=args.ranks,
@@ -703,6 +745,7 @@ def main() -> int:
                 script_path=args.script,
                 env_vars=env_vars,
                 script_args=bench_args,
+                extra_env=extra_env,
             )
         else:
             if args.bench_bin == "./XSBenchMPI":
@@ -722,6 +765,7 @@ def main() -> int:
                     bench_bin=args.bench_bin,
                     workdir=args.workdir,
                     minimd_args=bench_args,
+                    extra_env=extra_env,
                 )
             else:
                 cmd = build_sbatch_wrap_comd(
@@ -738,6 +782,7 @@ def main() -> int:
                     bench_bin=args.bench_bin,
                     workdir=args.workdir,
                     comd_args=bench_args,
+                    extra_env=extra_env,
                 )
     else:
         size_csv, lookups_csv = read_args_row(table, args.ranks)
@@ -752,6 +797,7 @@ def main() -> int:
                 env_vars["MPI_IFACE"] = args.mpi_iface
             if args.workdir:
                 env_vars["WORKDIR"] = args.workdir
+            env_vars.update(extra_env)
             cmd = build_sbatch_script(
                 nodes=args.nodes,
                 ranks=args.ranks,
@@ -764,6 +810,7 @@ def main() -> int:
                 ntasks_per_node=args.ntasks_per_node,
                 script_path=args.script,
                 env_vars=env_vars,
+                extra_env=extra_env,
             )
         else:
             cmd = build_sbatch_wrap(
@@ -781,6 +828,7 @@ def main() -> int:
                 workdir=args.workdir,
                 size=size,
                 lookups=lookups,
+                extra_env=extra_env,
             )
 
     print("Submitting:")

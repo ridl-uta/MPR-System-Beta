@@ -37,6 +37,12 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 export OMP_PROC_BIND=close
 export OMP_PLACES=cores
 
+JOB_REPEAT=${JOB_REPEAT:-1}
+if ! [[ "$JOB_REPEAT" =~ ^[0-9]+$ ]] || [[ "$JOB_REPEAT" -lt 1 ]]; then
+  echo "[ERROR] JOB_REPEAT must be a positive integer: $JOB_REPEAT" >&2
+  exit 2
+fi
+
 echo "========== CoMD Slurm Launch =========="
 echo "SLURM_JOBID             = ${SLURM_JOBID}"
 echo "SLURM_JOB_NODELIST      = ${SLURM_JOB_NODELIST}"
@@ -60,4 +66,7 @@ if [[ ! -x "$COMD_BIN" ]]; then
 fi
 
 # Launch CoMD.
-srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores "$COMD_BIN" "${RUN_ARGS[@]}"
+for ((job_repeat_iter=1; job_repeat_iter<=JOB_REPEAT; job_repeat_iter++)); do
+  echo "[INFO] JOB_REPEAT iteration ${job_repeat_iter}/${JOB_REPEAT}"
+  srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores "$COMD_BIN" "${RUN_ARGS[@]}"
+done

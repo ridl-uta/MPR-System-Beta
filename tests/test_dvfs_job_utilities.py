@@ -14,10 +14,19 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from dvfs.job_utilities import apply_reduction
+from dvfs.job_utilities import apply_reduction, build_sbatch_variations
 
 
 class ApplyReductionConfigTest(unittest.TestCase):
+    def test_build_sbatch_variations_appends_submit_env(self) -> None:
+        commands = build_sbatch_variations(submit_env=["JOB_REPEAT=2"])
+
+        self.assertTrue(commands)
+        for cmd in commands:
+            self.assertIn("--submit-env", cmd)
+            idx = cmd.index("--submit-env")
+            self.assertEqual(cmd[idx + 1], "JOB_REPEAT=2")
+
     def test_apply_reduction_writes_perf_ctl_cpufreq_sync_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_root = Path(tmpdir)

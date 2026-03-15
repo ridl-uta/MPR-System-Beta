@@ -26,8 +26,17 @@ export OMP_PLACES=cores
 SIZE=${SIZE:-small}
 LOOKUPS=${LOOKUPS:-10000}
 
+JOB_REPEAT=${JOB_REPEAT:-1}
+if ! [[ "$JOB_REPEAT" =~ ^[0-9]+$ ]] || [[ "$JOB_REPEAT" -lt 1 ]]; then
+  echo "[ERROR] JOB_REPEAT must be a positive integer: $JOB_REPEAT" >&2
+  exit 2
+fi
+
 cd "$WORKDIR"
 
 # Multi-rank + OpenMP; keep step success even if XSBench returns non-zero for checksum
 # Allow overriding MPI interface via MPI_IFACE (pmi2|pmix). Default to pmi2 for MPICH builds.
-srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores ./XSBenchMPI -s "$SIZE" -l "$LOOKUPS" -t "$OMP_NUM_THREADS" || true
+for ((job_repeat_iter=1; job_repeat_iter<=JOB_REPEAT; job_repeat_iter++)); do
+  echo "[INFO] JOB_REPEAT iteration ${job_repeat_iter}/${JOB_REPEAT}"
+  srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores ./XSBenchMPI -s "$SIZE" -l "$LOOKUPS" -t "$OMP_NUM_THREADS" || true
+done

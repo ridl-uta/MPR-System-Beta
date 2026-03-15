@@ -51,6 +51,7 @@ class MainController:
         record_exclude: Optional[str] = None,
         record_dry_run: bool = False,
         record_interval_mhz: int = 100,
+        record_submit_env: Optional[List[str]] = None,
     ) -> None:
         self._stop = threading.Event()
         self.power_monitor = power_monitor or PowerMonitor()
@@ -66,6 +67,7 @@ class MainController:
         self.record_exclude = record_exclude
         self.record_dry_run = record_dry_run
         self.record_interval_mhz = int(record_interval_mhz)
+        self.record_submit_env = list(record_submit_env or [])
         if self.record_interval_mhz <= 0:
             raise ValueError("record_interval_mhz must be > 0")
 
@@ -130,6 +132,7 @@ class MainController:
                 nodelist=self.record_nodelist,
                 cores_per_rank=10,
                 exclude=self.record_exclude,
+                submit_env=self.record_submit_env,
             )
             if not commands:
                 logging.warning("[Record] No Slurm scripts found; exiting record mode")
@@ -921,6 +924,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Frequency step (MHz) for record_performance DVFS sweeps",
     )
     parser.add_argument(
+        "--submit-env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Extra environment variable to pass through record_performance submissions; repeatable",
+    )
+    parser.add_argument(
         "--shed-watts",
         type=float,
         default=0.0,
@@ -1056,6 +1066,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         record_exclude=args.record_exclude,
         record_dry_run=args.record_dry_run,
         record_interval_mhz=args.record_interval_mhz,
+        record_submit_env=args.submit_env,
     )
 
     _install_signal_handlers(controller)

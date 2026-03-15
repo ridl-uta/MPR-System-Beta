@@ -398,6 +398,7 @@ def build_sbatch_variations(
     *,
     nodelist: Optional[str] = None,
     exclude: Optional[str] = None,
+    submit_env: Optional[List[str]] = None,
 ) -> List[List[str]]:
     """Generate sbatch commands for common rank/node configurations.
 
@@ -578,6 +579,8 @@ def build_sbatch_variations(
                     cmd += ["--exclude", ex]
                 if workdir:
                     cmd += ["--workdir", workdir]
+                for env_entry in submit_env or []:
+                    cmd += ["--submit-env", env_entry]
                 commands.append(cmd)
 
     return commands

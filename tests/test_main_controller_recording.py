@@ -8,6 +8,7 @@ import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
@@ -21,6 +22,26 @@ from main_controller import MainController
 
 
 class MainControllerRecordingTest(unittest.TestCase):
+    def test_record_mode_passes_submit_env_to_builder(self) -> None:
+        dummy_manager = types.SimpleNamespace(start=lambda: None, stop=lambda: None)
+        controller = MainController(
+            power_monitor=dummy_manager,
+            dvfs_manager=dummy_manager,
+            market_manager=dummy_manager,
+            record_interval_mhz=100,
+            record_submit_env=["JOB_REPEAT=2"],
+        )
+
+        with mock.patch("main_controller.build_sbatch_variations", return_value=[]) as mock_build:
+            controller._run_record_performance()
+
+        mock_build.assert_called_once_with(
+            nodelist=None,
+            cores_per_rank=10,
+            exclude=None,
+            submit_env=["JOB_REPEAT=2"],
+        )
+
     def test_cores_required_from_short_flags(self) -> None:
         controller = MainController(record_interval_mhz=100)
         cmd = [
