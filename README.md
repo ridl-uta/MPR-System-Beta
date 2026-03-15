@@ -266,6 +266,104 @@ Practical tip:
 - `--skip-dvfs-apply`
 - `--detect-overload-only` (disables all MPR/DVFS actions)
 
+### Control-Node DVFS Apply Helpers
+
+Set all cores on one node to `2.4 GHz` from the control node using the DVFS manager:
+
+```bash
+python3 tests/set_dvfs_from_control_node.py \
+  --node ridlserver05 \
+  --cores 0-19 \
+  --frequency-mhz 2400 \
+  --control-kind PERF_CTL \
+  --cpufreq-sync \
+  --ssh-user ridl
+```
+
+### Install on a New Compute Node
+
+Replace `ridlserver04` below with the target hostname when bringing up a different node.
+
+What to do:
+
+1. Reinstall the updated script and service from the repo checkout:
+
+```bash
+sudo bash dvfs/install_geopm_apply_systemd.sh
+```
+
+2. Put a small test config on the node:
+
+```bash
+cat >/shared/geopm/freq/ridlserver04.conf <<'EOF'
+### RULE test-cap
+FREQ_HZ=1.4e9
+CORES="2 6"
+CONTROL_KIND=PERF_CTL
+CPUFREQ_SYNC=1
+CPUFREQ_GOVERNOR=userspace
+EOF
+```
+
+3. Apply it and inspect the service log:
+
+```bash
+sudo systemctl start geopm-apply.service
+sudo journalctl -u geopm-apply.service -n 50
+```
+
+4. Check the matched cpufreq policies:
+
+```bash
+for p in /sys/devices/system/cpu/cpufreq/policy2 /sys/devices/system/cpu/cpufreq/policy6 /sys/devices/system/cpu/cpufreq/policy0; do
+  echo "=== $(basename "$p") ==="
+  cat "$p/affected_cpus"
+  cat "$p/scaling_governor"
+  cat "$p/scaling_min_freq"
+  cat "$p/scaling_max_freq"
+  cat "$p/scaling_setspeed" 2>/dev/null || true
+  echo
+done
+```
+
+### Monitor GEOPM Requested vs Actual Core Frequency
+
+Use this on the compute node to watch requested `MSR::PERF_CTL:FREQ` alongside actual `CPU_FREQUENCY_STATUS`:
+
+```bash
+while true; do
+  echo "=== MSR::PERF_CTL:FREQ ==="
+  python3 tests/print_active_core_frequencies.py --cores 0-19 --signal 'MSR::PERF_CTL:FREQ' --once
+  echo
+
+  echo "=== CPU_FREQUENCY_STATUS ==="
+  python3 tests/print_active_core_frequencies.py --cores 0-19 --signal CPU_FREQUENCY_STATUS --once
+  echo
+
+  sleep 2
+done
+```
+
+### Monitor Kernel cpufreq Policies
+
+Use this on the compute node to watch `/sys/devices/system/cpu/cpufreq/policy*` state:
+
+```bash
+while true; do
+  date
+  for p in /sys/devices/system/cpu/cpufreq/policy*; do
+    printf "%s affected=%s min=%s max=%s setspeed=%s\n" \
+      "$(basename "$p")" \
+      "$(cat "$p/affected_cpus")" \
+      "$(cat "$p/scaling_min_freq")" \
+      "$(cat "$p/scaling_max_freq")" \
+      "$(cat "$p/scaling_setspeed" 2>/dev/null || echo NA)"
+  done
+  echo
+  sleep 2
+done
+```
+
 ## Submission Parameters
 
 - `--rank JOB=RANK` (required, repeatable)
