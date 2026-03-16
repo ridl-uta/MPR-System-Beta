@@ -60,6 +60,12 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Delay in seconds between periodic job submissions (default: 0).",
     )
+    parser.add_argument(
+        "--pre-submit-wait-s",
+        type=float,
+        default=0.0,
+        help="One-time delay in seconds before the first job submission (default: 0).",
+    )
     parser.add_argument("--nodelist", default=None)
     parser.add_argument("--exclude", default=None)
     parser.add_argument(
@@ -281,6 +287,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--dvfs-verify-tol-mhz must be >= 0.")
     if args.post_jobs_monitor_s < 0:
         parser.error("--post-jobs-monitor-s must be >= 0.")
+    if args.pre_submit_wait_s < 0:
+        parser.error("--pre-submit-wait-s must be >= 0.")
     if args.overload_hysteresis_w < 0:
         parser.error("--overload-hysteresis-w must be >= 0.")
     if args.overload_min_over_s < 0:
@@ -401,6 +409,13 @@ def submit_jobs(
     if args.skip_submit:
         print("Skipping Slurm submission step (--skip-submit).")
         return pd.DataFrame()
+
+    if args.pre_submit_wait_s > 0 and not args.dry_run:
+        print(
+            f"Waiting {float(args.pre_submit_wait_s):.3f} seconds before first job submission "
+            "(--pre-submit-wait-s)."
+        )
+        time.sleep(float(args.pre_submit_wait_s))
 
     if args.submit_interval_s > 0:
         submit_df = scheduler.submit_jobs_periodic(
