@@ -14,6 +14,13 @@ HPCCG_BIN=${HPCCG_BIN:-./test_HPCCG}
 # Transport layer provider for libfabric-based MPI; sockets is the safe default.
 export FI_PROVIDER=${FI_PROVIDER:-sockets}
 
+# Open MPI transport defaults for this cluster. The subnet-based include avoids
+# hardcoding interface names that differ across compute nodes.
+export OMPI_MCA_pml=${OMPI_MCA_pml:-ob1}
+export OMPI_MCA_btl=${OMPI_MCA_btl:-self,vader,tcp}
+export OMPI_MCA_btl_tcp_if_include=${OMPI_MCA_btl_tcp_if_include:-192.168.2.0/24}
+export OMPI_MCA_oob_tcp_if_include=${OMPI_MCA_oob_tcp_if_include:-192.168.2.0/24}
+
 # OpenMP settings derived from Slurm cpus-per-task. These only take effect if the
 # selected HPCCG binary was built with OpenMP support.
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
@@ -37,6 +44,11 @@ echo
 echo "OMP_NUM_THREADS         = ${OMP_NUM_THREADS}"
 echo "OMP_PROC_BIND           = ${OMP_PROC_BIND}"
 echo "OMP_PLACES              = ${OMP_PLACES}"
+echo "MPI_IFACE               = ${MPI_IFACE:-pmi2}"
+echo "OMPI_MCA_pml            = ${OMPI_MCA_pml}"
+echo "OMPI_MCA_btl            = ${OMPI_MCA_btl}"
+echo "OMPI_MCA_btl_tcp_if_include = ${OMPI_MCA_btl_tcp_if_include}"
+echo "OMPI_MCA_oob_tcp_if_include = ${OMPI_MCA_oob_tcp_if_include}"
 echo
 echo "HPCCG_BIN               = ${HPCCG_BIN}"
 echo "NX NY NZ                = ${NX} ${NY} ${NZ}"
