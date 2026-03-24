@@ -44,7 +44,7 @@ echo
 echo "OMP_NUM_THREADS         = ${OMP_NUM_THREADS}"
 echo "OMP_PROC_BIND           = ${OMP_PROC_BIND}"
 echo "OMP_PLACES              = ${OMP_PLACES}"
-echo "MPI_IFACE               = ${MPI_IFACE:-pmi2}"
+echo "MPI_IFACE               = pmi2"
 echo "OMPI_MCA_pml            = ${OMPI_MCA_pml}"
 echo "OMPI_MCA_btl            = ${OMPI_MCA_btl}"
 echo "OMPI_MCA_btl_tcp_if_include = ${OMPI_MCA_btl_tcp_if_include}"
@@ -71,5 +71,5 @@ fi
 # for extending steady-state runtime without forcing larger problem sizes.
 for ((run_idx = 1; run_idx <= HPCCG_REPEAT; run_idx++)); do
   echo "========== HPCCG Iteration ${run_idx}/${HPCCG_REPEAT} =========="
-  srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores "$HPCCG_BIN" "$NX" "$NY" "$NZ"
+  srun --mpi=pmi2 --cpu-bind=cores "$HPCCG_BIN" "$NX" "$NY" "$NZ"
 done
