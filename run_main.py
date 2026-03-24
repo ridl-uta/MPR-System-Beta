@@ -263,6 +263,20 @@ def parse_args() -> argparse.Namespace:
         default=25.0,
         help="Allowed absolute target-vs-readback error (MHz) for PASS/FAIL verification.",
     )
+    cpufreq_sync_group = parser.add_mutually_exclusive_group()
+    cpufreq_sync_group.add_argument(
+        "--cpufreq-sync",
+        dest="cpufreq_sync",
+        action="store_true",
+        help="Enable kernel cpufreq policy sync alongside GEOPM DVFS apply (default).",
+    )
+    cpufreq_sync_group.add_argument(
+        "--no-cpufreq-sync",
+        dest="cpufreq_sync",
+        action="store_false",
+        help="Disable kernel cpufreq policy sync and use GEOPM DVFS apply only.",
+    )
+    parser.set_defaults(cpufreq_sync=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
@@ -881,7 +895,7 @@ def apply_dvfs_with_allocations(
     dvfs_controller = DVFSController(
         ssh_user=args.dvfs_ssh_user,
         verify_tolerance_mhz=float(args.dvfs_verify_tol_mhz),
-        cpufreq_sync=True,
+        cpufreq_sync=bool(args.cpufreq_sync),
         cpufreq_governor="userspace",
         cpufreq_min_khz=1_000_000,
     )
