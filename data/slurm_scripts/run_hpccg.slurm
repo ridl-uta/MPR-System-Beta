@@ -40,7 +40,7 @@ echo "SLURM_NTASKS            = ${SLURM_NTASKS:-}"
 echo "SLURM_NTASKS_PER_NODE   = ${SLURM_NTASKS_PER_NODE:-}"
 echo "SLURM_CPUS_PER_TASK     = ${SLURM_CPUS_PER_TASK:-1}"
 echo
-echo "MPI_IFACE               = ${MPI_IFACE:-pmi2}"
+echo "MPI_IFACE               = pmi2"
 echo "OMPI_MCA_pml            = ${OMPI_MCA_pml}"
 echo "OMPI_MCA_btl            = ${OMPI_MCA_btl}"
 echo "OMPI_MCA_btl_tcp_if_include = ${OMPI_MCA_btl_tcp_if_include}"
@@ -49,10 +49,10 @@ echo "NX NY NZ                = ${NX} ${NY} ${NZ}"
 echo "JOB_REPEAT              = ${JOB_REPEAT}"
 echo "========================================"
 
-# Launch HPCCG with the configured grid dimensions. Allow MPI_IFACE override.
+# Launch HPCCG with the configured grid dimensions using Slurm's pmi2 support.
 for ((job_repeat_iter=1; job_repeat_iter<=JOB_REPEAT; job_repeat_iter++)); do
   echo "[INFO] JOB_REPEAT iteration ${job_repeat_iter}/${JOB_REPEAT}"
-  srun --mpi=${MPI_IFACE:-pmi2} --cpu-bind=cores ./test_HPCCG "$NX" "$NY" "$NZ"
+  srun --mpi=pmi2 --cpu-bind=cores ./test_HPCCG "$NX" "$NY" "$NZ"
   status=$?
   if [[ "$status" -ne 0 ]]; then
     exit "$status"
