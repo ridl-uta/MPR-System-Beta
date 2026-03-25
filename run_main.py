@@ -33,6 +33,8 @@ ACTIVE_JOB_STATES = {
     "REQUEUED",
 }
 
+CONTROL_ELIGIBLE_JOB_STATES = ACTIVE_JOB_STATES - {"PENDING", "REQUEUED"}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Slurm + power + MPR + DVFS flow from terminal.")
@@ -806,6 +808,81 @@ def has_active_jobs(job_states: dict[str, str]) -> bool:
     return any(str(state).upper() in ACTIVE_JOB_STATES for state in job_states.values())
 
 
+def get_latest_submitted_job_rows(
+    scheduler: JobScheduler,
+    job_names: list[str],
+) -> pd.DataFrame:
+    if not job_names:
+        return pd.DataFrame()
+
+    history = scheduler.get_submission_history(job_names=job_names)
+    if history.empty:
+        return history
+
+    if "status" in history.columns:
+        history = history[history["status"].astype(str) == "SUBMITTED"]
+    if history.empty:
+        return history
+
+    key_column = "job_key" if "job_key" in history.columns else "job"
+    if key_column not in history.columns or "job_id" not in history.columns:
+        return pd.DataFrame()
+
+    return history.groupby(key_column, as_index=False).tail(1).reset_index(drop=True)
+
+
+def resolve_active_control_context(
+    *,
+    scheduler: JobScheduler,
+    tracked_job_keys: list[str],
+    job_perf_data: dict[str, pd.DataFrame],
+    job_states: dict[str, str],
+) -> tuple[dict[str, pd.DataFrame], dict[str, dict[str, Any]]]:
+    latest_rows = get_latest_submitted_job_rows(scheduler, tracked_job_keys)
+    if latest_rows.empty:
+        return {}, {}
+
+    key_column = "job_key" if "job_key" in latest_rows.columns else "job"
+    candidate_job_names: list[str] = []
+    for _, row in latest_rows.iterrows():
+        job_name = str(row[key_column]).strip()
+        job_id = str(row["job_id"]).strip()
+        if not job_name or not job_id:
+            continue
+        state = str(job_states.get(job_id, "COMPLETED")).upper()
+        if state in CONTROL_ELIGIBLE_JOB_STATES:
+            candidate_job_names.append(job_name)
+
+    if not candidate_job_names:
+        return {}, {}
+
+    allocations = scheduler.get_submitted_job_allocations(
+        job_names=candidate_job_names,
+        latest_only=True,
+    )
+    active_allocations: dict[str, dict[str, Any]] = {}
+    for job_name in candidate_job_names:
+        allocation = allocations.get(job_name)
+        if not allocation:
+            continue
+        cores_by_node = allocation.get("cores_by_node", {})
+        if not isinstance(cores_by_node, dict) or not cores_by_node:
+            continue
+        active_allocations[job_name] = allocation
+
+    active_job_perf_data = {
+        job_name: job_perf_data[job_name]
+        for job_name in candidate_job_names
+        if job_name in active_allocations and job_name in job_perf_data
+    }
+    active_allocations = {
+        job_name: active_allocations[job_name]
+        for job_name in candidate_job_names
+        if job_name in active_allocations
+    }
+    return active_job_perf_data, active_allocations
+
+
 def drain_overload_events(
     overload_event_queue: queue.Queue[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
@@ -1270,6 +1347,10 @@ def apply_overload_reduction(
     base_required_reduction_w: float | None,
     allocations_cache: dict[str, dict[str, Any]],
 ) -> tuple[bool, dict[str, dict[str, Any]]]:
+    if not job_perf_data:
+        print("\n[Control] No running jobs with live allocations are eligible for MPR. Skipping.")
+        return False, allocations_cache
+
     overload_w = max(0.0, float(current_power_w) - float(args.target_capacity_w))
     base_reduction_w = (
         overload_w
@@ -1322,6 +1403,9 @@ def apply_reset_to_max_frequency(
     job_names: list[str],
     allocations_cache: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
+    if not job_names:
+        print("\n[Control] No running jobs with live allocations require DVFS reset.")
+        return {}
     reset_map = {name: float(args.max_freq_mhz) for name in job_names}
     print(f"\nResetting DVFS to max frequency ({args.max_freq_mhz:.3f} MHz) after overload end.")
     used = apply_dvfs_with_allocations(
@@ -1414,6 +1498,13 @@ def run_event_driven_control_loop(
                 if not control_actions_enabled:
                     print("[Control] OVERLOAD_START observed (no control action in detect-overload-only mode).")
                 else:
+                    active_job_perf_data, active_allocations = resolve_active_control_context(
+                        scheduler=scheduler,
+                        tracked_job_keys=list(tracked_job_ranks.keys()),
+                        job_perf_data=job_perf_data,
+                        job_states=job_states,
+                    )
+                    allocations_cache = active_allocations
                     selected_total_watts = total_watts
                     selected_required_w = required_w
                     terminal_event_name: str | None = None
@@ -1438,7 +1529,7 @@ def run_event_driven_control_loop(
                     reduction_applied, allocations_cache = apply_overload_reduction(
                         args=args,
                         scheduler=scheduler,
-                        job_perf_data=job_perf_data,
+                        job_perf_data=active_job_perf_data,
                         current_power_w=selected_total_watts,
                         base_required_reduction_w=selected_required_w,
                         allocations_cache=allocations_cache,
@@ -1450,10 +1541,17 @@ def run_event_driven_control_loop(
                 if not control_actions_enabled:
                     print("[Control] OVERLOAD_END observed (no DVFS reset in detect-overload-only mode).")
                 elif reduction_active and not reset_applied:
+                    _, active_allocations = resolve_active_control_context(
+                        scheduler=scheduler,
+                        tracked_job_keys=list(tracked_job_ranks.keys()),
+                        job_perf_data=job_perf_data,
+                        job_states=job_states,
+                    )
+                    allocations_cache = active_allocations
                     allocations_cache = apply_reset_to_max_frequency(
                         scheduler=scheduler,
                         args=args,
-                        job_names=list(tracked_job_ranks.keys()),
+                        job_names=list(active_allocations.keys()),
                         allocations_cache=allocations_cache,
                     )
                     reduction_active = False
@@ -1552,6 +1650,13 @@ def run_event_driven_control_loop(
                             "detect-overload-only mode keeps frequencies unchanged."
                         )
                     else:
+                        _, active_allocations = resolve_active_control_context(
+                            scheduler=scheduler,
+                            tracked_job_keys=list(tracked_job_ranks.keys()),
+                            job_perf_data=job_perf_data,
+                            job_states=job_states,
+                        )
+                        allocations_cache = active_allocations
                         print(
                             "[Control] Post-job monitor window ended before OVERLOAD_END; "
                             "applying safety DVFS reset to max frequency."
@@ -1559,7 +1664,7 @@ def run_event_driven_control_loop(
                         allocations_cache = apply_reset_to_max_frequency(
                             scheduler=scheduler,
                             args=args,
-                            job_names=list(tracked_job_ranks.keys()),
+                            job_names=list(active_allocations.keys()),
                             allocations_cache=allocations_cache,
                         )
                         reduction_active = False

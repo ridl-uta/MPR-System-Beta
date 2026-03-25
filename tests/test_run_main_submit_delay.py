@@ -13,7 +13,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from run_main import parse_args, submit_jobs, submit_post_overload_end_jobs
+from run_main import (
+    parse_args,
+    resolve_active_control_context,
+    submit_jobs,
+    submit_post_overload_end_jobs,
+)
 from run_main import apply_dvfs_with_allocations
 
 
@@ -254,6 +259,97 @@ class TestRunMainPreSubmitWait(unittest.TestCase):
         self.assertFalse(mock_controller.call_args.kwargs["cpufreq_sync"])
         controller_instance.apply_to_job_allocation.assert_called_once()
         self.assertIn("hpccg", used)
+
+    def test_resolve_active_control_context_excludes_completed_and_pending_jobs(self) -> None:
+        scheduler = mock.Mock()
+        scheduler.get_submission_history.return_value = pd.DataFrame(
+            [
+                {"job_key": "xsbenchmpi", "job_id": "4424", "status": "SUBMITTED"},
+                {"job_key": "minimd", "job_id": "4425", "status": "SUBMITTED"},
+                {"job_key": "comd", "job_id": "4426", "status": "SUBMITTED"},
+                {"job_key": "xsbenchmpi__post_overload_end1", "job_id": "4428", "status": "SUBMITTED"},
+                {"job_key": "comd__post_overload_end1", "job_id": "4429", "status": "SUBMITTED"},
+            ]
+        )
+        scheduler.get_submitted_job_allocations.return_value = {
+            "minimd": {
+                "cores_by_node": {"ridlserver05": [0, 1]},
+                "nodes": ["ridlserver05"],
+            },
+            "comd": {
+                "cores_by_node": {},
+                "nodes": ["ridlserver11"],
+            },
+            "xsbenchmpi__post_overload_end1": {
+                "cores_by_node": {"ridlserver04": [0, 1], "ridlserver05": [0, 1]},
+                "nodes": ["ridlserver04", "ridlserver05"],
+            },
+        }
+
+        perf_df = pd.DataFrame(
+            {
+                "Resource Reduction": [0.0, 0.1],
+                "Extra Execution": [0.0, 1.0],
+                "Power": [100.0, 90.0],
+            }
+        )
+        job_perf_data = {
+            "xsbenchmpi": perf_df,
+            "minimd": perf_df,
+            "comd": perf_df,
+            "xsbenchmpi__post_overload_end1": perf_df,
+            "comd__post_overload_end1": perf_df,
+        }
+        job_states = {
+            "4424": "COMPLETED",
+            "4425": "RUNNING",
+            "4426": "CONFIGURING",
+            "4428": "RUNNING",
+            "4429": "PENDING",
+        }
+
+        active_perf_data, active_allocations = resolve_active_control_context(
+            scheduler=scheduler,
+            tracked_job_keys=list(job_perf_data.keys()),
+            job_perf_data=job_perf_data,
+            job_states=job_states,
+        )
+
+        scheduler.get_submitted_job_allocations.assert_called_once_with(
+            job_names=["minimd", "comd", "xsbenchmpi__post_overload_end1"],
+            latest_only=True,
+        )
+        self.assertEqual(
+            list(active_perf_data.keys()),
+            ["minimd", "xsbenchmpi__post_overload_end1"],
+        )
+        self.assertEqual(
+            list(active_allocations.keys()),
+            ["minimd", "xsbenchmpi__post_overload_end1"],
+        )
+        self.assertNotIn("xsbenchmpi", active_perf_data)
+        self.assertNotIn("comd__post_overload_end1", active_perf_data)
+        self.assertNotIn("comd", active_perf_data)
+
+    def test_resolve_active_control_context_skips_allocation_lookup_without_eligible_jobs(self) -> None:
+        scheduler = mock.Mock()
+        scheduler.get_submission_history.return_value = pd.DataFrame(
+            [
+                {"job_key": "xsbenchmpi", "job_id": "4424", "status": "SUBMITTED"},
+                {"job_key": "comd__post_overload_end1", "job_id": "4429", "status": "SUBMITTED"},
+            ]
+        )
+
+        active_perf_data, active_allocations = resolve_active_control_context(
+            scheduler=scheduler,
+            tracked_job_keys=["xsbenchmpi", "comd__post_overload_end1"],
+            job_perf_data={"xsbenchmpi": pd.DataFrame(), "comd__post_overload_end1": pd.DataFrame()},
+            job_states={"4424": "COMPLETED", "4429": "PENDING"},
+        )
+
+        scheduler.get_submitted_job_allocations.assert_not_called()
+        self.assertEqual(active_perf_data, {})
+        self.assertEqual(active_allocations, {})
 
 
 if __name__ == "__main__":
