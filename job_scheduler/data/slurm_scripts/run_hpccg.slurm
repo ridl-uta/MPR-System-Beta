@@ -32,7 +32,7 @@ SIZE=${SIZE:-180}
 NX=${NX:-$SIZE}
 NY=${NY:-$SIZE}
 NZ=${NZ:-$SIZE}
-HPCCG_REPEAT=${HPCCG_REPEAT:-20}
+HPCCG_REPEAT=${HPCCG_REPEAT:-10}
 
 echo "========== HPCCG Slurm Launch =========="
 echo "SLURM_JOBID             = ${SLURM_JOBID}"
