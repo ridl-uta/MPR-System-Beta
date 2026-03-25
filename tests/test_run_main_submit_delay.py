@@ -13,7 +13,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from run_main import parse_args, submit_jobs
+from run_main import parse_args, submit_jobs, submit_post_overload_end_jobs
 from run_main import apply_dvfs_with_allocations
 
 
@@ -57,6 +57,42 @@ class TestRunMainPreSubmitWait(unittest.TestCase):
             "--rank",
             "hpccg=2",
             "--pre-submit-wait-s",
+            "-1",
+        ]
+        with mock.patch.object(sys, "argv", argv):
+            with self.assertRaises(SystemExit) as ctx:
+                parse_args()
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_parse_args_accepts_post_overload_end_submission(self) -> None:
+        argv = [
+            "run_main.py",
+            "--rank",
+            "hpccg=2",
+            "--post-overload-end-rank",
+            "minimd=2",
+            "--post-overload-end-rank",
+            "comd=4",
+            "--post-overload-end-wait-s",
+            "30",
+        ]
+        with mock.patch.object(sys, "argv", argv):
+            args = parse_args()
+        self.assertEqual(args.post_overload_end_wait_s, 30.0)
+        self.assertEqual(args.post_overload_end_job_ranks, {"minimd": 2, "comd": 4})
+        self.assertEqual(
+            args.post_overload_end_job_base_names,
+            {"minimd": "minimd", "comd": "comd"},
+        )
+
+    def test_parse_args_rejects_negative_post_overload_end_wait(self) -> None:
+        argv = [
+            "run_main.py",
+            "--rank",
+            "hpccg=2",
+            "--post-overload-end-rank",
+            "minimd=2",
+            "--post-overload-end-wait-s",
             "-1",
         ]
         with mock.patch.object(sys, "argv", argv):
@@ -131,6 +167,49 @@ class TestRunMainPreSubmitWait(unittest.TestCase):
 
         mock_sleep.assert_not_called()
         scheduler.submit_jobs.assert_called_once()
+
+    def test_submit_post_overload_end_jobs_uses_unique_keys(self) -> None:
+        scheduler = mock.Mock()
+        scheduler.submit_jobs.return_value = pd.DataFrame(
+            [{"job": "minimd__post_overload_end1", "job_id": "5001"}]
+        )
+
+        args = types.SimpleNamespace(
+            cpus_per_rank=10,
+            ranks_per_node=2,
+            partition="debug",
+            time_limit="00:30:00",
+            nodelist=None,
+            exclude=None,
+            slurm_output=None,
+            mpi_iface=None,
+            submit_env_map={},
+            job_args_map={},
+            disable_rank_profiles=False,
+            dry_run=False,
+            post_overload_end_job_ranks={"minimd": 2},
+            post_overload_end_job_base_names={"minimd": "minimd"},
+            post_overload_end_job_display_names={"minimd": "minimd"},
+        )
+
+        submit_df, job_ranks, job_base_names, job_display_names = submit_post_overload_end_jobs(
+            scheduler,
+            args,
+            existing_job_keys={"hpccg", "minimd"},
+        )
+
+        scheduler.submit_jobs.assert_called_once()
+        self.assertEqual(
+            scheduler.submit_jobs.call_args.kwargs["job_ranks"],
+            {"minimd__post_overload_end1": 2},
+        )
+        self.assertEqual(job_ranks, {"minimd__post_overload_end1": 2})
+        self.assertEqual(job_base_names, {"minimd__post_overload_end1": "minimd"})
+        self.assertEqual(
+            job_display_names,
+            {"minimd__post_overload_end1": "minimd__post_overload_end1"},
+        )
+        self.assertFalse(submit_df.empty)
 
     def test_apply_dvfs_forwards_cpufreq_sync_setting(self) -> None:
         scheduler = mock.Mock()

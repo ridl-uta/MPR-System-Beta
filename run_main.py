@@ -66,6 +66,25 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="One-time delay in seconds before the first job submission (default: 0).",
     )
+    parser.add_argument(
+        "--post-overload-end-rank",
+        action="append",
+        default=[],
+        metavar="JOB=RANK",
+        help=(
+            "Additional job rank spec (repeatable) submitted once after the first "
+            "OVERLOAD_END and --post-overload-end-wait-s delay."
+        ),
+    )
+    parser.add_argument(
+        "--post-overload-end-wait-s",
+        type=float,
+        default=0.0,
+        help=(
+            "One-time delay in seconds after OVERLOAD_END before submitting "
+            "--post-overload-end-rank jobs (default: 0)."
+        ),
+    )
     parser.add_argument("--nodelist", default=None)
     parser.add_argument("--exclude", default=None)
     parser.add_argument(
@@ -303,6 +322,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--post-jobs-monitor-s must be >= 0.")
     if args.pre_submit_wait_s < 0:
         parser.error("--pre-submit-wait-s must be >= 0.")
+    if args.post_overload_end_wait_s < 0:
+        parser.error("--post-overload-end-wait-s must be >= 0.")
     if args.overload_hysteresis_w < 0:
         parser.error("--overload-hysteresis-w must be >= 0.")
     if args.overload_min_over_s < 0:
@@ -322,6 +343,16 @@ def parse_args() -> argparse.Namespace:
         parser.error("--overload-handled-low-margin-w must be >= 0.")
     try:
         args.job_ranks, args.job_base_names, args.job_display_names = parse_job_specs(args.rank)
+        if args.post_overload_end_rank:
+            (
+                args.post_overload_end_job_ranks,
+                args.post_overload_end_job_base_names,
+                args.post_overload_end_job_display_names,
+            ) = parse_job_specs(args.post_overload_end_rank)
+        else:
+            args.post_overload_end_job_ranks = {}
+            args.post_overload_end_job_base_names = {}
+            args.post_overload_end_job_display_names = {}
         args.submit_env_map = parse_key_value_overrides(args.submit_env)
         args.job_args_map = parse_job_args_overrides(args.job_args)
     except ValueError as exc:
@@ -477,6 +508,88 @@ def submit_jobs(
     return submit_df
 
 
+def uniquify_job_specs(
+    job_ranks: dict[str, int],
+    job_base_names: dict[str, str],
+    job_display_names: dict[str, str],
+    *,
+    existing_keys: set[str],
+    suffix_tag: str,
+) -> tuple[dict[str, int], dict[str, str], dict[str, str]]:
+    unique_job_ranks: dict[str, int] = {}
+    unique_job_base_names: dict[str, str] = {}
+    unique_job_display_names: dict[str, str] = {}
+    reserved_keys = set(existing_keys)
+
+    for job_key, rank_count in job_ranks.items():
+        candidate_key = job_key
+        suffix_index = 1
+        while candidate_key in reserved_keys or candidate_key in unique_job_ranks:
+            candidate_key = f"{job_key}__{suffix_tag}{suffix_index}"
+            suffix_index += 1
+
+        base_name = job_base_names.get(job_key, job_key)
+        display_name = job_display_names.get(job_key, base_name)
+        if candidate_key != job_key:
+            display_name = candidate_key
+
+        unique_job_ranks[candidate_key] = rank_count
+        unique_job_base_names[candidate_key] = base_name
+        unique_job_display_names[candidate_key] = display_name
+        reserved_keys.add(candidate_key)
+
+    return unique_job_ranks, unique_job_base_names, unique_job_display_names
+
+
+def submit_post_overload_end_jobs(
+    scheduler: JobScheduler,
+    args: argparse.Namespace,
+    *,
+    existing_job_keys: set[str],
+) -> tuple[pd.DataFrame, dict[str, int], dict[str, str], dict[str, str]]:
+    post_job_ranks = getattr(args, "post_overload_end_job_ranks", {})
+    if not post_job_ranks:
+        return pd.DataFrame(), {}, {}, {}
+
+    (
+        unique_job_ranks,
+        unique_job_base_names,
+        unique_job_display_names,
+    ) = uniquify_job_specs(
+        post_job_ranks,
+        getattr(args, "post_overload_end_job_base_names", {}),
+        getattr(args, "post_overload_end_job_display_names", {}),
+        existing_keys=existing_job_keys,
+        suffix_tag="post_overload_end",
+    )
+
+    submit_df = scheduler.submit_jobs(
+        job_ranks=unique_job_ranks,
+        cpus_per_rank=args.cpus_per_rank,
+        ranks_per_node=args.ranks_per_node,
+        partition=args.partition,
+        time_limit=args.time_limit,
+        nodelist=args.nodelist,
+        exclude=args.exclude,
+        output_path=args.slurm_output,
+        mpi_iface=args.mpi_iface,
+        env_overrides=args.submit_env_map,
+        job_base_names=unique_job_base_names,
+        job_display_names=unique_job_display_names,
+        script_args_by_job=args.job_args_map,
+        use_rank_profiles=not args.disable_rank_profiles,
+        dry_run=args.dry_run,
+    )
+
+    print("\nPost-OVERLOAD_END submission summary:")
+    if submit_df.empty:
+        print("No follow-up submissions attempted.")
+    else:
+        print(submit_df.to_string(index=False))
+
+    return submit_df, unique_job_ranks, unique_job_base_names, unique_job_display_names
+
+
 def print_allocations(
     scheduler: JobScheduler,
     args: argparse.Namespace,
@@ -499,16 +612,18 @@ def fetch_job_perf_data(
     job_ranks: dict[str, int],
     *,
     strict: bool = True,
+    audit_heading: str = "Performance data audit",
+    loaded_heading: str = "Loaded job models",
 ) -> dict[str, pd.DataFrame]:
     job_perf_data, perf_audit_df = scheduler.get_cached_perf_data(
         job_names=list(job_ranks.keys())
     )
-    print("\nPerformance data audit:")
+    print(f"\n{audit_heading}:")
     if perf_audit_df.empty:
         print("No cached audit rows. Submit jobs (or disable --skip-submit) to auto-load performance data.")
     else:
         print(perf_audit_df.to_string(index=False))
-    print("Loaded job models:", list(job_perf_data.keys()))
+    print(f"{loaded_heading}:", list(job_perf_data.keys()))
 
     if strict and not job_perf_data:
         raise RuntimeError(
@@ -1259,6 +1374,9 @@ def run_event_driven_control_loop(
     reset_applied = True
     jobs_completed_since: float | None = None
     allocations_cache: dict[str, dict[str, Any]] = {}
+    tracked_job_ranks = dict(job_ranks)
+    post_overload_end_submit_at: float | None = None
+    post_overload_end_submitted = False
 
     if not control_actions_enabled:
         print(
@@ -1335,11 +1453,22 @@ def run_event_driven_control_loop(
                     allocations_cache = apply_reset_to_max_frequency(
                         scheduler=scheduler,
                         args=args,
-                        job_names=list(job_ranks.keys()),
+                        job_names=list(tracked_job_ranks.keys()),
                         allocations_cache=allocations_cache,
                     )
                     reduction_active = False
                     reset_applied = True
+                if (
+                    args.post_overload_end_job_ranks
+                    and not post_overload_end_submitted
+                    and post_overload_end_submit_at is None
+                ):
+                    post_overload_end_submit_at = time.monotonic() + float(args.post_overload_end_wait_s)
+                    print(
+                        "[Control] Scheduling post-OVERLOAD_END jobs:",
+                        f"wait_s={float(args.post_overload_end_wait_s):.3f}",
+                        f"job_ranks={args.post_overload_end_job_ranks}",
+                    )
             elif event_name == "OVERLOAD_HANDLED":
                 payload = event.get("payload", {})
                 if isinstance(payload, dict):
@@ -1356,11 +1485,58 @@ def run_event_driven_control_loop(
                 else:
                     print("[Control] overload handled zone reached.")
 
+        if (
+            post_overload_end_submit_at is not None
+            and not post_overload_end_submitted
+            and time.monotonic() >= post_overload_end_submit_at
+        ):
+            (
+                post_submit_df,
+                new_job_ranks,
+                _new_job_base_names,
+                _new_job_display_names,
+            ) = submit_post_overload_end_jobs(
+                scheduler,
+                args,
+                existing_job_keys=set(tracked_job_ranks.keys()),
+            )
+            post_overload_end_submit_at = None
+            post_overload_end_submitted = True
+            if not post_submit_df.empty:
+                new_job_ids = collect_submitted_job_ids(post_submit_df)
+                submitted_job_ids.extend(job_id for job_id in new_job_ids if job_id not in submitted_job_ids)
+                tracked_job_ranks.update(new_job_ranks)
+                job_perf_data.update(
+                    fetch_job_perf_data(
+                        scheduler,
+                        new_job_ranks,
+                        strict=not args.dry_run,
+                        audit_heading="Post-OVERLOAD_END performance data audit",
+                        loaded_heading="Loaded post-OVERLOAD_END job models",
+                    )
+                )
+                jobs_completed_since = None
+                for job_id in new_job_ids:
+                    job_states.setdefault(job_id, "PENDING")
+                next_job_poll = 0.0
+                next_job_print = 0.0
+                print_allocations(scheduler, args, post_submit_df, new_job_ranks)
+
         jobs_active = has_active_jobs(job_states)
         if jobs_active:
             jobs_completed_since = None
         else:
             now_done = time.monotonic()
+            if post_overload_end_submit_at is not None and not post_overload_end_submitted:
+                remaining_s = max(0.0, post_overload_end_submit_at - now_done)
+                if jobs_completed_since is None:
+                    jobs_completed_since = now_done
+                    print(
+                        "[Control] All currently submitted jobs completed. "
+                        f"Waiting {remaining_s:.1f}s for post-OVERLOAD_END submission."
+                    )
+                time.sleep(loop_interval_s)
+                continue
             if jobs_completed_since is None:
                 jobs_completed_since = now_done
                 print(
@@ -1383,7 +1559,7 @@ def run_event_driven_control_loop(
                         allocations_cache = apply_reset_to_max_frequency(
                             scheduler=scheduler,
                             args=args,
-                            job_names=list(job_ranks.keys()),
+                            job_names=list(tracked_job_ranks.keys()),
                             allocations_cache=allocations_cache,
                         )
                         reduction_active = False
@@ -1409,6 +1585,19 @@ def main() -> int:
             print("Job display names:", args.job_display_names)
         if any(name != base for name, base in args.job_base_names.items()):
             print("Job base names:", args.job_base_names)
+        if args.post_overload_end_job_ranks:
+            print("Post-OVERLOAD_END job ranks:", args.post_overload_end_job_ranks)
+            print(f"Post-OVERLOAD_END wait_s: {float(args.post_overload_end_wait_s):.3f}")
+            if any(
+                name != display
+                for name, display in args.post_overload_end_job_display_names.items()
+            ):
+                print("Post-OVERLOAD_END job display names:", args.post_overload_end_job_display_names)
+            if any(
+                name != base
+                for name, base in args.post_overload_end_job_base_names.items()
+            ):
+                print("Post-OVERLOAD_END job base names:", args.post_overload_end_job_base_names)
 
         submit_df = submit_jobs(
             scheduler,
