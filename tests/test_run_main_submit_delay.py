@@ -14,7 +14,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from run_main import (
-    get_reset_target_allocations,
+    apply_overload_end_reset_to_max_frequency,
+    apply_startup_reset_to_max_frequency,
     parse_args,
     resolve_active_control_context,
     submit_jobs,
@@ -389,19 +390,85 @@ class TestRunMainPreSubmitWait(unittest.TestCase):
         self.assertEqual(list(active_perf_data.keys()), ["comd", "hpccg"])
         self.assertEqual(list(active_allocations.keys()), ["comd", "hpccg"])
 
-        prior_reduction_allocations = {
-            "xsbenchmpi": {
-                "cores_by_node": {"ridlserver04": [0, 1]},
-                "nodes": ["ridlserver04"],
-            },
-            **active_allocations,
-        }
-        reset_targets = get_reset_target_allocations(prior_reduction_allocations)
-
-        self.assertEqual(
-            list(reset_targets.keys()),
-            ["xsbenchmpi", "comd", "hpccg"],
+    def test_apply_startup_reset_to_max_frequency_targets_all_mapped_nodes(self) -> None:
+        controller_instance = mock.Mock()
+        controller_instance.apply_to_cores.side_effect = [
+            [
+                {
+                    "node_name": "ridlserver04",
+                    "core_number": 0,
+                    "readback_avg_mhz": 2400.0,
+                    "readback_min_mhz": 2400.0,
+                    "readback_max_mhz": 2400.0,
+                    "readback_abs_error_mhz": 0.0,
+                    "verify_tolerance_mhz": 25.0,
+                    "verify_status": "PASS",
+                    "verify_reason": "within_tolerance",
+                    "status": "DRY_RUN",
+                }
+            ],
+            [
+                {
+                    "node_name": "ridlserver05",
+                    "core_number": 0,
+                    "readback_avg_mhz": 2400.0,
+                    "readback_min_mhz": 2400.0,
+                    "readback_max_mhz": 2400.0,
+                    "readback_abs_error_mhz": 0.0,
+                    "verify_tolerance_mhz": 25.0,
+                    "verify_status": "PASS",
+                    "verify_reason": "within_tolerance",
+                    "status": "DRY_RUN",
+                }
+            ],
+        ]
+        args = types.SimpleNamespace(
+            skip_dvfs_apply=False,
+            pdu_map=None,
+            dvfs_ssh_user="ridl",
+            dvfs_verify_tol_mhz=25.0,
+            cpufreq_sync=True,
+            max_freq_mhz=2400.0,
+            dry_run=True,
         )
+
+        with (
+            mock.patch("run_main.get_mapped_reset_nodes", return_value=["ridlserver04", "ridlserver05"]),
+            mock.patch("run_main.discover_node_core_ids", side_effect=[[0, 1], [0, 1]]) as mock_discover,
+            mock.patch("run_main.DVFSController", return_value=controller_instance) as mock_controller,
+            mock.patch("run_main.print_dvfs_apply_summary") as mock_print_summary,
+        ):
+            apply_startup_reset_to_max_frequency(args)
+
+        mock_controller.assert_called_once()
+        self.assertEqual(mock_discover.call_count, 2)
+        self.assertEqual(controller_instance.apply_to_cores.call_count, 2)
+        first_call = controller_instance.apply_to_cores.call_args_list[0].kwargs
+        second_call = controller_instance.apply_to_cores.call_args_list[1].kwargs
+        self.assertEqual(first_call["node_name"], "ridlserver04")
+        self.assertEqual(second_call["node_name"], "ridlserver05")
+        self.assertEqual(first_call["frequency_mhz"], 2400.0)
+        self.assertTrue(first_call["dry_run"])
+        mock_print_summary.assert_called_once()
+
+    def test_apply_overload_end_reset_to_max_frequency_targets_all_mapped_nodes(self) -> None:
+        with mock.patch("run_main.apply_full_frequency_reset_to_all_nodes") as mock_apply:
+            apply_overload_end_reset_to_max_frequency(
+                types.SimpleNamespace(
+                    skip_dvfs_apply=False,
+                    pdu_map=None,
+                    dvfs_ssh_user="ridl",
+                    dvfs_verify_tol_mhz=25.0,
+                    cpufreq_sync=True,
+                    max_freq_mhz=2400.0,
+                    dry_run=True,
+                )
+            )
+
+        mock_apply.assert_called_once()
+        _, kwargs = mock_apply.call_args
+        self.assertEqual(kwargs["action_label"], "Overload-end DVFS reset")
+        self.assertEqual(kwargs["summary_job_label"], "overload_end_reset")
 
 
 if __name__ == "__main__":

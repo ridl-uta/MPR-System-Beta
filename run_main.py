@@ -8,6 +8,7 @@ import json
 import math
 import queue
 import shlex
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from dvfs import DVFSController
 from job_scheduler import JobScheduler
 from mpr_int import normalize_job_perf_data, run_threaded_mpr_int
 from power_monitor import PowerMonitor, make_simple_overload_ctx, simple_overload_update
+from power_monitor.mapping import load_mapping
 
 ACTIVE_JOB_STATES = {
     "PENDING",
@@ -34,6 +36,134 @@ ACTIVE_JOB_STATES = {
 }
 
 CONTROL_ELIGIBLE_JOB_STATES = ACTIVE_JOB_STATES - {"PENDING", "REQUEUED"}
+
+
+def parse_lscpu_core_ids(topology_text: str) -> list[int]:
+    core_ids: set[int] = set()
+    for line in str(topology_text).splitlines():
+        row = line.strip()
+        if not row or row.startswith("#"):
+            continue
+        parts = row.split(",", 1)
+        if len(parts) != 2:
+            continue
+        try:
+            core_id = int(parts[1].strip())
+        except ValueError:
+            continue
+        core_ids.add(core_id)
+    return sorted(core_ids)
+
+
+def discover_node_core_ids(
+    node_name: str,
+    *,
+    ssh_user: str | None,
+) -> list[int]:
+    topology_cmd = "lscpu -p=CPU,CORE"
+    if DVFSController._is_local_host(node_name):
+        cmd = ["bash", "-lc", topology_cmd]
+    else:
+        ssh_target = f"{ssh_user}@{node_name}" if ssh_user else str(node_name)
+        cmd = ["ssh", "-o", "BatchMode=yes", ssh_target, topology_cmd]
+
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip() or "no details"
+        raise RuntimeError(
+            f"failed to discover cores for node '{node_name}' (exit {proc.returncode}): {stderr}"
+        )
+
+    core_ids = parse_lscpu_core_ids(proc.stdout)
+    if not core_ids:
+        raise RuntimeError(f"no cores discovered for node '{node_name}' from lscpu output")
+    return core_ids
+
+
+def get_mapped_reset_nodes(args: argparse.Namespace) -> list[str]:
+    mapping_cfg = load_mapping(args.pdu_map)
+    nodes: list[str] = []
+    for pdu in mapping_cfg.pdus:
+        for node_name in pdu.outlet_map.values():
+            normalized = str(node_name).strip()
+            if normalized and normalized not in nodes:
+                nodes.append(normalized)
+    return sorted(nodes)
+
+
+def apply_full_frequency_reset_to_all_nodes(
+    args: argparse.Namespace,
+    *,
+    action_label: str,
+    summary_job_label: str,
+) -> None:
+    if args.skip_dvfs_apply:
+        print(f"\n{action_label} skipped (--skip-dvfs-apply).")
+        return
+
+    node_names = get_mapped_reset_nodes(args)
+    if not node_names:
+        print(f"\n{action_label} skipped (no mapped nodes found).")
+        return
+
+    dvfs_controller = DVFSController(
+        ssh_user=args.dvfs_ssh_user,
+        verify_tolerance_mhz=float(args.dvfs_verify_tol_mhz),
+        cpufreq_sync=bool(args.cpufreq_sync),
+        cpufreq_governor="userspace",
+        cpufreq_min_khz=1_000_000,
+    )
+
+    print(
+        f"\n{action_label}:",
+        f"target_freq_mhz={float(args.max_freq_mhz):.3f}",
+        f"nodes={node_names}",
+    )
+    dvfs_rows: list[dict[str, object]] = []
+    for node_name in node_names:
+        core_ids = discover_node_core_ids(
+            node_name,
+            ssh_user=args.dvfs_ssh_user,
+        )
+        for row in dvfs_controller.apply_to_cores(
+            node_name=node_name,
+            core_numbers=core_ids,
+            frequency_mhz=float(args.max_freq_mhz),
+            dry_run=bool(args.dry_run),
+        ):
+            row_with_job = dict(row)
+            row_with_job["job"] = summary_job_label
+            row_with_job["requested_target_mhz"] = float(args.max_freq_mhz)
+            row_with_job["applied_target_mhz"] = float(args.max_freq_mhz)
+            dvfs_rows.append(row_with_job)
+
+    if not dvfs_rows:
+        print(f"{action_label} produced no core-level actions.")
+        return
+
+    print_dvfs_apply_summary(pd.DataFrame(dvfs_rows))
+
+
+def apply_startup_reset_to_max_frequency(args: argparse.Namespace) -> None:
+    apply_full_frequency_reset_to_all_nodes(
+        args,
+        action_label="Startup DVFS reset",
+        summary_job_label="startup_reset",
+    )
+
+
+def apply_overload_end_reset_to_max_frequency(args: argparse.Namespace) -> None:
+    apply_full_frequency_reset_to_all_nodes(
+        args,
+        action_label="Overload-end DVFS reset",
+        summary_job_label="overload_end_reset",
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -883,16 +1013,6 @@ def resolve_active_control_context(
     return active_job_perf_data, active_allocations
 
 
-def get_reset_target_allocations(
-    reset_allocations_cache: dict[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    return {
-        job_name: allocation
-        for job_name, allocation in reset_allocations_cache.items()
-        if isinstance(allocation.get("cores_by_node", {}), dict) and allocation.get("cores_by_node")
-    }
-
-
 def drain_overload_events(
     overload_event_queue: queue.Queue[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
@@ -1406,28 +1526,6 @@ def apply_overload_reduction(
     return True, allocations_cache
 
 
-def apply_reset_to_max_frequency(
-    *,
-    scheduler: JobScheduler,
-    args: argparse.Namespace,
-    job_names: list[str],
-    allocations_cache: dict[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    if not job_names:
-        print("\n[Control] No tracked job allocations require DVFS reset.")
-        return allocations_cache
-    reset_map = {name: float(args.max_freq_mhz) for name in job_names}
-    print(f"\nResetting DVFS to max frequency ({args.max_freq_mhz:.3f} MHz) after overload end.")
-    used = apply_dvfs_with_allocations(
-        scheduler=scheduler,
-        args=args,
-        job_freq_mhz=reset_map,
-        allocations_hint=allocations_cache,
-    )
-    allocations_cache.update(used)
-    return allocations_cache
-
-
 def run_event_driven_control_loop(
     *,
     scheduler: JobScheduler,
@@ -1468,7 +1566,6 @@ def run_event_driven_control_loop(
     reset_applied = True
     jobs_completed_since: float | None = None
     market_allocations_cache: dict[str, dict[str, Any]] = {}
-    reset_allocations_cache: dict[str, dict[str, Any]] = {}
     tracked_job_ranks = dict(job_ranks)
     post_overload_end_submit_at: float | None = None
     post_overload_end_submitted = False
@@ -1546,24 +1643,14 @@ def run_event_driven_control_loop(
                         allocations_cache=market_allocations_cache,
                     )
                     if reduction_applied:
-                        reset_allocations_cache.update(
-                            get_reset_target_allocations(market_allocations_cache)
-                        )
                         reduction_active = True
                         reset_applied = False
             elif event_name == "OVERLOAD_END":
                 if not control_actions_enabled:
                     print("[Control] OVERLOAD_END observed (no DVFS reset in detect-overload-only mode).")
-                elif reduction_active and not reset_applied:
-                    reset_targets = get_reset_target_allocations(reset_allocations_cache)
-                    reset_allocations_cache = apply_reset_to_max_frequency(
-                        scheduler=scheduler,
-                        args=args,
-                        job_names=list(reset_targets.keys()),
-                        allocations_cache=reset_targets,
-                    )
+                else:
+                    apply_overload_end_reset_to_max_frequency(args)
                     market_allocations_cache = {}
-                    reset_allocations_cache = {}
                     reduction_active = False
                     reset_applied = True
                 if (
@@ -1660,19 +1747,12 @@ def run_event_driven_control_loop(
                             "detect-overload-only mode keeps frequencies unchanged."
                         )
                     else:
-                        reset_targets = get_reset_target_allocations(reset_allocations_cache)
                         print(
                             "[Control] Post-job monitor window ended before OVERLOAD_END; "
                             "applying safety DVFS reset to max frequency."
                         )
-                        reset_allocations_cache = apply_reset_to_max_frequency(
-                            scheduler=scheduler,
-                            args=args,
-                            job_names=list(reset_targets.keys()),
-                            allocations_cache=reset_targets,
-                        )
+                        apply_overload_end_reset_to_max_frequency(args)
                         market_allocations_cache = {}
-                        reset_allocations_cache = {}
                         reduction_active = False
                         reset_applied = True
                 print("Post-job monitoring window ended. Exiting event-driven control loop.")
@@ -1685,9 +1765,14 @@ def main() -> int:
     args = parse_args()
     scheduler = JobScheduler()
     job_ranks = args.job_ranks
-    monitor, monitor_stop_event, monitor_worker, overload_event_queue = start_power_monitor(args)
+    monitor = None
+    monitor_stop_event = None
+    monitor_worker = None
+    overload_event_queue = None
 
     try:
+        apply_startup_reset_to_max_frequency(args)
+        monitor, monitor_stop_event, monitor_worker, overload_event_queue = start_power_monitor(args)
         print("Source Slurm scripts:", scheduler.source_scripts_dir)
         print("Available jobs:", scheduler.available_jobs())
         print("Performance workbook:", scheduler.perf_xlsx_path)
