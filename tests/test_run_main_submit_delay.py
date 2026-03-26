@@ -14,6 +14,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from run_main import (
+    get_reset_target_allocations,
     parse_args,
     resolve_active_control_context,
     submit_jobs,
@@ -350,6 +351,57 @@ class TestRunMainPreSubmitWait(unittest.TestCase):
         scheduler.get_submitted_job_allocations.assert_not_called()
         self.assertEqual(active_perf_data, {})
         self.assertEqual(active_allocations, {})
+
+    def test_reset_targets_preserve_completed_jobs_from_prior_reduction(self) -> None:
+        scheduler = mock.Mock()
+        scheduler.get_submission_history.return_value = pd.DataFrame(
+            [
+                {"job_key": "xsbenchmpi", "job_id": "4430", "status": "SUBMITTED"},
+                {"job_key": "comd", "job_id": "4432", "status": "SUBMITTED"},
+                {"job_key": "hpccg", "job_id": "4433", "status": "SUBMITTED"},
+            ]
+        )
+        scheduler.get_submitted_job_allocations.return_value = {
+            "comd": {
+                "cores_by_node": {"ridlserver11": [0, 1]},
+                "nodes": ["ridlserver11"],
+            },
+            "hpccg": {
+                "cores_by_node": {"ridlserver12": [0, 1]},
+                "nodes": ["ridlserver12"],
+            },
+        }
+
+        perf_df = pd.DataFrame(
+            {
+                "Resource Reduction": [0.0, 0.1],
+                "Extra Execution": [0.0, 1.0],
+                "Power": [100.0, 90.0],
+            }
+        )
+        active_perf_data, active_allocations = resolve_active_control_context(
+            scheduler=scheduler,
+            tracked_job_keys=["xsbenchmpi", "comd", "hpccg"],
+            job_perf_data={"xsbenchmpi": perf_df, "comd": perf_df, "hpccg": perf_df},
+            job_states={"4430": "COMPLETED", "4432": "RUNNING", "4433": "RUNNING"},
+        )
+
+        self.assertEqual(list(active_perf_data.keys()), ["comd", "hpccg"])
+        self.assertEqual(list(active_allocations.keys()), ["comd", "hpccg"])
+
+        prior_reduction_allocations = {
+            "xsbenchmpi": {
+                "cores_by_node": {"ridlserver04": [0, 1]},
+                "nodes": ["ridlserver04"],
+            },
+            **active_allocations,
+        }
+        reset_targets = get_reset_target_allocations(prior_reduction_allocations)
+
+        self.assertEqual(
+            list(reset_targets.keys()),
+            ["xsbenchmpi", "comd", "hpccg"],
+        )
 
 
 if __name__ == "__main__":

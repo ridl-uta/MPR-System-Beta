@@ -883,6 +883,16 @@ def resolve_active_control_context(
     return active_job_perf_data, active_allocations
 
 
+def get_reset_target_allocations(
+    reset_allocations_cache: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    return {
+        job_name: allocation
+        for job_name, allocation in reset_allocations_cache.items()
+        if isinstance(allocation.get("cores_by_node", {}), dict) and allocation.get("cores_by_node")
+    }
+
+
 def drain_overload_events(
     overload_event_queue: queue.Queue[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
@@ -1404,8 +1414,8 @@ def apply_reset_to_max_frequency(
     allocations_cache: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     if not job_names:
-        print("\n[Control] No running jobs with live allocations require DVFS reset.")
-        return {}
+        print("\n[Control] No tracked job allocations require DVFS reset.")
+        return allocations_cache
     reset_map = {name: float(args.max_freq_mhz) for name in job_names}
     print(f"\nResetting DVFS to max frequency ({args.max_freq_mhz:.3f} MHz) after overload end.")
     used = apply_dvfs_with_allocations(
@@ -1457,7 +1467,8 @@ def run_event_driven_control_loop(
     reduction_active = False
     reset_applied = True
     jobs_completed_since: float | None = None
-    allocations_cache: dict[str, dict[str, Any]] = {}
+    market_allocations_cache: dict[str, dict[str, Any]] = {}
+    reset_allocations_cache: dict[str, dict[str, Any]] = {}
     tracked_job_ranks = dict(job_ranks)
     post_overload_end_submit_at: float | None = None
     post_overload_end_submitted = False
@@ -1504,7 +1515,7 @@ def run_event_driven_control_loop(
                         job_perf_data=job_perf_data,
                         job_states=job_states,
                     )
-                    allocations_cache = active_allocations
+                    market_allocations_cache = active_allocations
                     selected_total_watts = total_watts
                     selected_required_w = required_w
                     terminal_event_name: str | None = None
@@ -1526,34 +1537,33 @@ def run_event_driven_control_loop(
                         )
                     if terminal_event_name is not None:
                         continue
-                    reduction_applied, allocations_cache = apply_overload_reduction(
+                    reduction_applied, market_allocations_cache = apply_overload_reduction(
                         args=args,
                         scheduler=scheduler,
                         job_perf_data=active_job_perf_data,
                         current_power_w=selected_total_watts,
                         base_required_reduction_w=selected_required_w,
-                        allocations_cache=allocations_cache,
+                        allocations_cache=market_allocations_cache,
                     )
                     if reduction_applied:
+                        reset_allocations_cache.update(
+                            get_reset_target_allocations(market_allocations_cache)
+                        )
                         reduction_active = True
                         reset_applied = False
             elif event_name == "OVERLOAD_END":
                 if not control_actions_enabled:
                     print("[Control] OVERLOAD_END observed (no DVFS reset in detect-overload-only mode).")
                 elif reduction_active and not reset_applied:
-                    _, active_allocations = resolve_active_control_context(
-                        scheduler=scheduler,
-                        tracked_job_keys=list(tracked_job_ranks.keys()),
-                        job_perf_data=job_perf_data,
-                        job_states=job_states,
-                    )
-                    allocations_cache = active_allocations
-                    allocations_cache = apply_reset_to_max_frequency(
+                    reset_targets = get_reset_target_allocations(reset_allocations_cache)
+                    reset_allocations_cache = apply_reset_to_max_frequency(
                         scheduler=scheduler,
                         args=args,
-                        job_names=list(active_allocations.keys()),
-                        allocations_cache=allocations_cache,
+                        job_names=list(reset_targets.keys()),
+                        allocations_cache=reset_targets,
                     )
+                    market_allocations_cache = {}
+                    reset_allocations_cache = {}
                     reduction_active = False
                     reset_applied = True
                 if (
@@ -1650,23 +1660,19 @@ def run_event_driven_control_loop(
                             "detect-overload-only mode keeps frequencies unchanged."
                         )
                     else:
-                        _, active_allocations = resolve_active_control_context(
-                            scheduler=scheduler,
-                            tracked_job_keys=list(tracked_job_ranks.keys()),
-                            job_perf_data=job_perf_data,
-                            job_states=job_states,
-                        )
-                        allocations_cache = active_allocations
+                        reset_targets = get_reset_target_allocations(reset_allocations_cache)
                         print(
                             "[Control] Post-job monitor window ended before OVERLOAD_END; "
                             "applying safety DVFS reset to max frequency."
                         )
-                        allocations_cache = apply_reset_to_max_frequency(
+                        reset_allocations_cache = apply_reset_to_max_frequency(
                             scheduler=scheduler,
                             args=args,
-                            job_names=list(active_allocations.keys()),
-                            allocations_cache=allocations_cache,
+                            job_names=list(reset_targets.keys()),
+                            allocations_cache=reset_targets,
                         )
+                        market_allocations_cache = {}
+                        reset_allocations_cache = {}
                         reduction_active = False
                         reset_applied = True
                 print("Post-job monitoring window ended. Exiting event-driven control loop.")
