@@ -315,8 +315,8 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "Optional handled-zone margin below target. "
-            "Default tracks detector dynamic low threshold."
+            "Deprecated compatibility option. Ignored; handled detection now "
+            "uses only target capacity plus --overload-handled-high-margin-w."
         ),
     )
     parser.add_argument(
@@ -1676,6 +1676,11 @@ def run_event_driven_control_loop(
                     print(
                         "[Control] overload handled zone reached: "
                         f"{float(zone_low):.3f}W..{float(zone_high):.3f}W"
+                    )
+                elif zone_high is not None:
+                    print(
+                        "[Control] overload handled threshold reached: "
+                        f"<= {float(zone_high):.3f}W"
                     )
                 else:
                     print("[Control] overload handled zone reached.")

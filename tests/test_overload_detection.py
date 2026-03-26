@@ -75,8 +75,8 @@ class TestOverloadDetectionHandledZone(unittest.TestCase):
 
         handled = next(e for e in events if e[2] == "OVERLOAD_HANDLED")
         payload = handled[3] if isinstance(handled[3], dict) else {}
-        self.assertAlmostEqual(float(payload.get("zone_low_w", -1.0)), 720.0, places=6)
         self.assertAlmostEqual(float(payload.get("zone_high_w", -1.0)), 752.0, places=6)
+        self.assertNotIn("zone_low_w", payload)
 
     def test_zero_high_margin_does_not_handle_above_target(self) -> None:
         ctx = make_simple_overload_ctx(
@@ -88,14 +88,35 @@ class TestOverloadDetectionHandledZone(unittest.TestCase):
             handled_window_s=3,
             handled_high_margin_w=0.0,  # handled zone high == target
         )
-        watts = [742, 744, 746, 748, 747, 746, 745, 744, 743, 742, 741, 742, 745, 746, 718, 717, 716]
+        watts = [742, 744, 746, 748, 747, 746, 745, 744, 743, 742, 741, 742, 745, 746]
         events = _run_series(ctx, watts)
         names = [e[2] for e in events]
         self.assertIn("OVERLOAD_START", names)
         self.assertNotIn("OVERLOAD_HANDLED", names)
-        self.assertIn("OVERLOAD_END", names)
 
-    def test_fixed_low_margin_override_is_used(self) -> None:
+    def test_low_margin_setting_is_ignored_for_handled_detection(self) -> None:
+        ctx = make_simple_overload_ctx(
+            sample_period_s=1.0,
+            threshold_w=740.0,
+            hysteresis_w=20.0,
+            min_over_s=2,
+            cooldown_s=5,
+            handled_window_s=2,
+            handled_high_margin_w=10.0,
+            handled_low_margin_w=15.0,
+        )
+        watts = [742, 744, 710, 712, 713, 714]
+        events = _run_series(ctx, watts)
+        names = [e[2] for e in events]
+        self.assertIn("OVERLOAD_START", names)
+        self.assertIn("OVERLOAD_HANDLED", names)
+
+        handled = next(e for e in events if e[2] == "OVERLOAD_HANDLED")
+        payload = handled[3] if isinstance(handled[3], dict) else {}
+        self.assertAlmostEqual(float(payload.get("zone_high_w", -1.0)), 750.0, places=6)
+        self.assertNotIn("zone_low_w", payload)
+
+    def test_overload_handled_triggers_once_per_cycle(self) -> None:
         ctx = make_simple_overload_ctx(
             sample_period_s=1.0,
             threshold_w=740.0,
@@ -104,18 +125,14 @@ class TestOverloadDetectionHandledZone(unittest.TestCase):
             cooldown_s=3,
             handled_window_s=2,
             handled_high_margin_w=10.0,
-            handled_low_margin_w=15.0,  # handled zone low = 725
         )
-        watts = [742, 744, 730, 732, 733, 731]
+        watts = [742, 744, 748, 749, 760, 759, 748, 749, 718, 717, 716]
         events = _run_series(ctx, watts)
         names = [e[2] for e in events]
-        self.assertIn("OVERLOAD_START", names)
-        self.assertIn("OVERLOAD_HANDLED", names)
 
-        handled = next(e for e in events if e[2] == "OVERLOAD_HANDLED")
-        payload = handled[3] if isinstance(handled[3], dict) else {}
-        self.assertAlmostEqual(float(payload.get("zone_low_w", -1.0)), 725.0, places=6)
-        self.assertAlmostEqual(float(payload.get("zone_high_w", -1.0)), 750.0, places=6)
+        self.assertEqual(names.count("OVERLOAD_START"), 1)
+        self.assertEqual(names.count("OVERLOAD_HANDLED"), 1)
+        self.assertEqual(names.count("OVERLOAD_END"), 1)
 
 
 if __name__ == "__main__":
