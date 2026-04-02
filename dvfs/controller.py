@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import socket
 import shlex
@@ -147,10 +148,13 @@ class DVFSController:
     def _host_conf_path(self, node_name: str) -> Path:
         return self.conf_dir / f"{node_name}.conf"
 
-    def _write_host_config(self, *, node_name: str, core_numbers: List[int], frequency_hz: int) -> Path:
-        self.conf_dir.mkdir(parents=True, exist_ok=True)
-        conf_path = self._host_conf_path(node_name)
-
+    def _write_rule_config(
+        self,
+        *,
+        conf_path: Path,
+        core_numbers: List[int],
+        frequency_hz: int,
+    ) -> Path:
         lines = [
             "### RULE dvfs-controller",
             f"FREQ_HZ={int(frequency_hz)}",
@@ -170,6 +174,36 @@ class DVFSController:
 
         conf_path.write_text("\n".join(lines), encoding="ascii")
         return conf_path
+
+    def _write_host_config(self, *, node_name: str, core_numbers: List[int], frequency_hz: int) -> Path:
+        self.conf_dir.mkdir(parents=True, exist_ok=True)
+        conf_path = self._host_conf_path(node_name)
+        return self._write_rule_config(
+            conf_path=conf_path,
+            core_numbers=core_numbers,
+            frequency_hz=frequency_hz,
+        )
+
+    def _write_host_config_dir(
+        self,
+        *,
+        node_name: str,
+        rules: List[Dict[str, Any]],
+    ) -> Path:
+        self.conf_dir.mkdir(parents=True, exist_ok=True)
+        conf_dir_path = self.conf_dir / f"{node_name}.d"
+        conf_dir_path.mkdir(parents=True, exist_ok=True)
+        for existing in conf_dir_path.glob("*.conf"):
+            existing.unlink(missing_ok=True)
+
+        for idx, rule in enumerate(rules):
+            conf_path = conf_dir_path / f"{idx:04d}.conf"
+            self._write_rule_config(
+                conf_path=conf_path,
+                core_numbers=self._normalize_cores(rule["core_numbers"]),
+                frequency_hz=int(rule["frequency_hz"]),
+            )
+        return conf_dir_path
 
     def _build_apply_command(
         self,
@@ -210,7 +244,14 @@ class DVFSController:
             run_target = "service_script"
         return cmd, run_target
 
-    def _run_apply_for_host(self, *, node_name: str, conf_path: Path, dry_run: bool) -> Dict[str, Any]:
+    def _run_apply_for_host(
+        self,
+        *,
+        node_name: str,
+        conf_path: Path,
+        dry_run: bool,
+        force_direct: bool = False,
+    ) -> Dict[str, Any]:
         with tempfile.NamedTemporaryFile(mode="w", encoding="ascii", delete=False) as tf:
             tf.write(f"{node_name}\n")
             hosts_file = tf.name
@@ -220,7 +261,7 @@ class DVFSController:
                 hosts_file=hosts_file,
                 conf_path=conf_path,
                 dry_run=dry_run,
-                force_direct=False,
+                force_direct=force_direct,
             )
             command_str = self._tokens_to_str(cmd)
             proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
@@ -493,3 +534,108 @@ class DVFSController:
                 )
             )
         return results
+
+    def apply_rules_to_node(
+        self,
+        *,
+        node_name: str,
+        rules: Iterable[Dict[str, Any]],
+        dry_run: bool = False,
+    ) -> List[Dict[str, Any]]:
+        normalized_rules: list[dict[str, Any]] = []
+        for rule in rules:
+            cores = self._normalize_cores(rule.get("core_numbers", []))
+            if not cores:
+                continue
+
+            frequency_hz = rule.get("frequency_hz")
+            frequency_mhz = rule.get("frequency_mhz")
+            if frequency_hz is None:
+                if frequency_mhz is None:
+                    raise ValueError("Each node rule must provide frequency_hz or frequency_mhz.")
+                frequency_hz = self._mhz_to_hz(float(frequency_mhz))
+            frequency_hz = int(frequency_hz)
+            if frequency_hz <= 0:
+                raise ValueError("frequency_hz must be > 0")
+
+            normalized_rules.append(
+                {
+                    "core_numbers": cores,
+                    "frequency_hz": frequency_hz,
+                }
+            )
+
+        if not normalized_rules:
+            return []
+
+        conf_target = self._write_host_config_dir(node_name=node_name, rules=normalized_rules)
+        apply_result = self._run_apply_for_host(
+            node_name=node_name,
+            conf_path=conf_target,
+            dry_run=dry_run,
+            force_direct=True,
+        )
+
+        rows: list[dict[str, Any]] = []
+        for rule in normalized_rules:
+            requested_mhz = float(rule["frequency_hz"]) / 1e6
+            verification = self._build_verification_fields(
+                requested_mhz=requested_mhz,
+                status=str(apply_result["status"]),
+                returncode=int(apply_result["returncode"]),
+                stdout=str(apply_result["stdout"]),
+                target_core_numbers=rule["core_numbers"],
+            )
+            for core in rule["core_numbers"]:
+                rows.append(
+                    {
+                        "node_name": str(node_name),
+                        "core_number": int(core),
+                        "frequency_hz": int(rule["frequency_hz"]),
+                        "frequency_mhz": requested_mhz,
+                        "control_kind": self.control_kind,
+                        "cpufreq_sync": self.cpufreq_sync,
+                        "cpufreq_governor": self.cpufreq_governor,
+                        "cpufreq_min_khz": self.cpufreq_min_khz,
+                        "config_path": str(conf_target),
+                        "status": apply_result["status"],
+                        "run_target": apply_result["run_target"],
+                        "command": apply_result["command"],
+                        "returncode": apply_result["returncode"],
+                        "stdout": apply_result["stdout"],
+                        "stderr": apply_result["stderr"],
+                        **verification,
+                    }
+                )
+        return rows
+
+    def apply_plan_by_node(
+        self,
+        *,
+        node_rules: Dict[str, List[Dict[str, Any]]],
+        dry_run: bool = False,
+    ) -> List[Dict[str, Any]]:
+        if not node_rules:
+            return []
+
+        rows: list[dict[str, Any]] = []
+        max_workers = min(max(1, self.concurrency), len(node_rules))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_node = {
+                executor.submit(
+                    self.apply_rules_to_node,
+                    node_name=str(node_name),
+                    rules=list(rules),
+                    dry_run=dry_run,
+                ): str(node_name)
+                for node_name, rules in node_rules.items()
+            }
+            for future in as_completed(future_to_node):
+                node_name = future_to_node[future]
+                try:
+                    rows.extend(future.result())
+                except Exception as exc:
+                    raise RuntimeError(f"DVFS apply failed for node '{node_name}': {exc}") from exc
+
+        rows.sort(key=lambda row: (str(row["node_name"]), int(row["core_number"])))
+        return rows

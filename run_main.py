@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Iterable
 import json
 import math
 import queue
@@ -97,6 +99,103 @@ def get_mapped_reset_nodes(args: argparse.Namespace) -> list[str]:
     return sorted(nodes)
 
 
+def discover_node_core_ids_by_node(
+    *,
+    node_names: list[str],
+    ssh_user: str | None,
+    max_workers: int = 8,
+) -> dict[str, list[int]]:
+    if not node_names:
+        return {}
+
+    core_ids_by_node: dict[str, list[int]] = {}
+    worker_count = min(max(1, int(max_workers)), len(node_names))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_to_node = {
+            executor.submit(discover_node_core_ids, node_name, ssh_user=ssh_user): node_name
+            for node_name in node_names
+        }
+        for future in as_completed(future_to_node):
+            node_name = future_to_node[future]
+            core_ids_by_node[node_name] = future.result()
+    return core_ids_by_node
+
+
+def build_dvfs_apply_plan(
+    *,
+    args: argparse.Namespace,
+    job_freq_mhz: dict[str, float],
+    allocations: dict[str, dict[str, Any]],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[tuple[str, int], dict[str, Any]], dict[str, dict[str, Any]]]:
+    node_core_targets: dict[str, dict[int, dict[str, Any]]] = {}
+    used_allocations: dict[str, dict[str, Any]] = {}
+
+    for job_name, target_freq_mhz in job_freq_mhz.items():
+        allocation = allocations.get(job_name)
+        if not allocation:
+            print(f"[DVFS] No allocation for job '{job_name}', skipping.")
+            continue
+
+        cores_by_node = allocation.get("cores_by_node", {})
+        if not isinstance(cores_by_node, dict) or not cores_by_node:
+            print(f"[DVFS] No core mapping for job '{job_name}', skipping.")
+            continue
+
+        requested_target_mhz = float(target_freq_mhz)
+        snapped_target_mhz = snap_floor_frequency_mhz(
+            requested_mhz=requested_target_mhz,
+            step_mhz=float(args.dvfs_step_mhz),
+        )
+        if abs(snapped_target_mhz - requested_target_mhz) > 1e-9:
+            print(
+                f"[DVFS] {job_name}: target snapped "
+                f"{requested_target_mhz:.3f} -> {snapped_target_mhz:.3f} MHz "
+                f"(step={float(args.dvfs_step_mhz):.3f})"
+            )
+
+        added = False
+        for node_name, cores in cores_by_node.items():
+            if not isinstance(cores, Iterable) or isinstance(cores, (str, bytes)):
+                continue
+            node_targets = node_core_targets.setdefault(str(node_name), {})
+            for core in cores:
+                core_number = int(core)
+                meta = {
+                    "job": job_name,
+                    "requested_target_mhz": requested_target_mhz,
+                    "applied_target_mhz": snapped_target_mhz,
+                }
+                existing = node_targets.get(core_number)
+                if existing is not None:
+                    if abs(float(existing["applied_target_mhz"]) - snapped_target_mhz) > 1e-9:
+                        raise RuntimeError(
+                            "conflicting DVFS targets for "
+                            f"node={node_name} core={core_number}: "
+                            f"{existing['job']}->{existing['applied_target_mhz']:.3f} MHz vs "
+                            f"{job_name}->{snapped_target_mhz:.3f} MHz"
+                        )
+                    continue
+                node_targets[core_number] = meta
+                added = True
+
+        if added:
+            used_allocations[job_name] = allocation
+
+    node_rules: dict[str, list[dict[str, Any]]] = {}
+    core_metadata: dict[tuple[str, int], dict[str, Any]] = {}
+    for node_name, core_targets in node_core_targets.items():
+        freq_to_cores: dict[float, list[int]] = {}
+        for core_number, meta in sorted(core_targets.items()):
+            freq_to_cores.setdefault(float(meta["applied_target_mhz"]), []).append(int(core_number))
+            core_metadata[(str(node_name), int(core_number))] = dict(meta)
+        node_rules[str(node_name)] = [
+            {"core_numbers": sorted(cores), "frequency_mhz": float(target_mhz)}
+            for target_mhz, cores in sorted(freq_to_cores.items())
+        ]
+
+    return node_rules, core_metadata, used_allocations
+
+
 def apply_full_frequency_reset_to_all_nodes(
     args: argparse.Namespace,
     *,
@@ -125,23 +224,31 @@ def apply_full_frequency_reset_to_all_nodes(
         f"target_freq_mhz={float(args.max_freq_mhz):.3f}",
         f"nodes={node_names}",
     )
-    dvfs_rows: list[dict[str, object]] = []
-    for node_name in node_names:
-        core_ids = discover_node_core_ids(
-            node_name,
-            ssh_user=args.dvfs_ssh_user,
-        )
-        for row in dvfs_controller.apply_to_cores(
-            node_name=node_name,
-            core_numbers=core_ids,
-            frequency_mhz=float(args.max_freq_mhz),
-            dry_run=bool(args.dry_run),
-        ):
-            row_with_job = dict(row)
-            row_with_job["job"] = summary_job_label
-            row_with_job["requested_target_mhz"] = float(args.max_freq_mhz)
-            row_with_job["applied_target_mhz"] = float(args.max_freq_mhz)
-            dvfs_rows.append(row_with_job)
+    core_ids_by_node = discover_node_core_ids_by_node(
+        node_names=node_names,
+        ssh_user=args.dvfs_ssh_user,
+        max_workers=dvfs_controller.concurrency,
+    )
+    node_rules = {
+        node_name: [
+            {
+                "core_numbers": core_ids,
+                "frequency_mhz": float(args.max_freq_mhz),
+            }
+        ]
+        for node_name, core_ids in core_ids_by_node.items()
+        if core_ids
+    }
+    dvfs_rows = []
+    for row in dvfs_controller.apply_plan_by_node(
+        node_rules=node_rules,
+        dry_run=bool(args.dry_run),
+    ):
+        row_with_job = dict(row)
+        row_with_job["job"] = summary_job_label
+        row_with_job["requested_target_mhz"] = float(args.max_freq_mhz)
+        row_with_job["applied_target_mhz"] = float(args.max_freq_mhz)
+        dvfs_rows.append(row_with_job)
 
     if not dvfs_rows:
         print(f"{action_label} produced no core-level actions.")
@@ -1221,41 +1328,24 @@ def apply_dvfs_with_allocations(
         cpufreq_governor="userspace",
         cpufreq_min_khz=1_000_000,
     )
+    node_rules, core_metadata, used_allocations = build_dvfs_apply_plan(
+        args=args,
+        job_freq_mhz=job_freq_mhz,
+        allocations=allocations,
+    )
+
     dvfs_rows: list[dict[str, object]] = []
-    used_allocations: dict[str, dict[str, Any]] = {}
-    for job_name, target_freq_mhz in job_freq_mhz.items():
-        allocation = allocations.get(job_name)
-        if not allocation:
-            print(f"[DVFS] No allocation for job '{job_name}', skipping.")
-            continue
-        cores_by_node = allocation.get("cores_by_node", {})
-        if not isinstance(cores_by_node, dict) or not cores_by_node:
-            print(f"[DVFS] No core mapping for job '{job_name}', skipping.")
-            continue
-        requested_target_mhz = float(target_freq_mhz)
-        snapped_target_mhz = snap_floor_frequency_mhz(
-            requested_mhz=requested_target_mhz,
-            step_mhz=float(args.dvfs_step_mhz),
-        )
-        if abs(snapped_target_mhz - requested_target_mhz) > 1e-9:
-            print(
-                f"[DVFS] {job_name}: target snapped "
-                f"{requested_target_mhz:.3f} -> {snapped_target_mhz:.3f} MHz "
-                f"(step={float(args.dvfs_step_mhz):.3f})"
-            )
-        before_count = len(dvfs_rows)
-        for row in dvfs_controller.apply_to_job_allocation(
-            allocation=allocation,
-            frequency_mhz=snapped_target_mhz,
-            dry_run=args.dry_run,
-        ):
-            row_with_job = dict(row)
-            row_with_job["job"] = job_name
-            row_with_job["requested_target_mhz"] = requested_target_mhz
-            row_with_job["applied_target_mhz"] = snapped_target_mhz
-            dvfs_rows.append(row_with_job)
-        if len(dvfs_rows) > before_count:
-            used_allocations[job_name] = allocation
+    for row in dvfs_controller.apply_plan_by_node(
+        node_rules=node_rules,
+        dry_run=bool(args.dry_run),
+    ):
+        row_with_job = dict(row)
+        meta = core_metadata.get((str(row_with_job["node_name"]), int(row_with_job["core_number"])))
+        if meta is not None:
+            row_with_job["job"] = meta["job"]
+            row_with_job["requested_target_mhz"] = float(meta["requested_target_mhz"])
+            row_with_job["applied_target_mhz"] = float(meta["applied_target_mhz"])
+        dvfs_rows.append(row_with_job)
 
     if not dvfs_rows:
         print("\nDVFS apply produced no core-level actions.")

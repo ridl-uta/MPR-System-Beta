@@ -221,7 +221,7 @@ class TestRunMainPreSubmitWait(unittest.TestCase):
     def test_apply_dvfs_forwards_cpufreq_sync_setting(self) -> None:
         scheduler = mock.Mock()
         controller_instance = mock.Mock()
-        controller_instance.apply_to_job_allocation.return_value = [
+        controller_instance.apply_plan_by_node.return_value = [
             {
                 "node_name": "ridlserver04",
                 "core_number": 0,
@@ -259,8 +259,77 @@ class TestRunMainPreSubmitWait(unittest.TestCase):
 
         mock_controller.assert_called_once()
         self.assertFalse(mock_controller.call_args.kwargs["cpufreq_sync"])
-        controller_instance.apply_to_job_allocation.assert_called_once()
+        controller_instance.apply_plan_by_node.assert_called_once()
+        node_rules = controller_instance.apply_plan_by_node.call_args.kwargs["node_rules"]
+        self.assertEqual(list(node_rules.keys()), ["ridlserver04"])
+        self.assertEqual(node_rules["ridlserver04"][0]["core_numbers"], [0, 1])
+        self.assertEqual(node_rules["ridlserver04"][0]["frequency_mhz"], 1800.0)
         self.assertIn("hpccg", used)
+
+    def test_apply_dvfs_batches_same_node_targets_before_apply(self) -> None:
+        scheduler = mock.Mock()
+        controller_instance = mock.Mock()
+        controller_instance.apply_plan_by_node.return_value = [
+            {
+                "node_name": "ridlserver04",
+                "core_number": 0,
+                "readback_avg_mhz": 1600.0,
+                "readback_min_mhz": 1600.0,
+                "readback_max_mhz": 1600.0,
+                "readback_abs_error_mhz": 0.0,
+                "verify_tolerance_mhz": 25.0,
+                "verify_status": "PASS",
+                "verify_reason": "within_tolerance",
+                "status": "APPLIED",
+            },
+            {
+                "node_name": "ridlserver04",
+                "core_number": 2,
+                "readback_avg_mhz": 1800.0,
+                "readback_min_mhz": 1800.0,
+                "readback_max_mhz": 1800.0,
+                "readback_abs_error_mhz": 0.0,
+                "verify_tolerance_mhz": 25.0,
+                "verify_status": "PASS",
+                "verify_reason": "within_tolerance",
+                "status": "APPLIED",
+            },
+        ]
+        args = types.SimpleNamespace(
+            skip_dvfs_apply=False,
+            dvfs_ssh_user=None,
+            dvfs_verify_tol_mhz=25.0,
+            cpufreq_sync=True,
+            dvfs_step_mhz=100.0,
+            dry_run=False,
+        )
+        allocations = {
+            "hpccg": {
+                "cores_by_node": {"ridlserver04": [0, 1]},
+            },
+            "comd": {
+                "cores_by_node": {"ridlserver04": [2, 3]},
+            },
+        }
+
+        with mock.patch("run_main.DVFSController", return_value=controller_instance):
+            apply_dvfs_with_allocations(
+                scheduler=scheduler,
+                args=args,
+                job_freq_mhz={"hpccg": 1600.0, "comd": 1800.0},
+                allocations_hint=allocations,
+            )
+
+        controller_instance.apply_plan_by_node.assert_called_once()
+        node_rules = controller_instance.apply_plan_by_node.call_args.kwargs["node_rules"]
+        self.assertEqual(list(node_rules.keys()), ["ridlserver04"])
+        self.assertEqual(
+            node_rules["ridlserver04"],
+            [
+                {"core_numbers": [0, 1], "frequency_mhz": 1600.0},
+                {"core_numbers": [2, 3], "frequency_mhz": 1800.0},
+            ],
+        )
 
     def test_resolve_active_control_context_excludes_completed_and_pending_jobs(self) -> None:
         scheduler = mock.Mock()
@@ -392,35 +461,32 @@ class TestRunMainPreSubmitWait(unittest.TestCase):
 
     def test_apply_startup_reset_to_max_frequency_targets_all_mapped_nodes(self) -> None:
         controller_instance = mock.Mock()
-        controller_instance.apply_to_cores.side_effect = [
-            [
-                {
-                    "node_name": "ridlserver04",
-                    "core_number": 0,
-                    "readback_avg_mhz": 2400.0,
-                    "readback_min_mhz": 2400.0,
-                    "readback_max_mhz": 2400.0,
-                    "readback_abs_error_mhz": 0.0,
-                    "verify_tolerance_mhz": 25.0,
-                    "verify_status": "PASS",
-                    "verify_reason": "within_tolerance",
-                    "status": "DRY_RUN",
-                }
-            ],
-            [
-                {
-                    "node_name": "ridlserver05",
-                    "core_number": 0,
-                    "readback_avg_mhz": 2400.0,
-                    "readback_min_mhz": 2400.0,
-                    "readback_max_mhz": 2400.0,
-                    "readback_abs_error_mhz": 0.0,
-                    "verify_tolerance_mhz": 25.0,
-                    "verify_status": "PASS",
-                    "verify_reason": "within_tolerance",
-                    "status": "DRY_RUN",
-                }
-            ],
+        controller_instance.concurrency = 8
+        controller_instance.apply_plan_by_node.return_value = [
+            {
+                "node_name": "ridlserver04",
+                "core_number": 0,
+                "readback_avg_mhz": 2400.0,
+                "readback_min_mhz": 2400.0,
+                "readback_max_mhz": 2400.0,
+                "readback_abs_error_mhz": 0.0,
+                "verify_tolerance_mhz": 25.0,
+                "verify_status": "PASS",
+                "verify_reason": "within_tolerance",
+                "status": "DRY_RUN",
+            },
+            {
+                "node_name": "ridlserver05",
+                "core_number": 0,
+                "readback_avg_mhz": 2400.0,
+                "readback_min_mhz": 2400.0,
+                "readback_max_mhz": 2400.0,
+                "readback_abs_error_mhz": 0.0,
+                "verify_tolerance_mhz": 25.0,
+                "verify_status": "PASS",
+                "verify_reason": "within_tolerance",
+                "status": "DRY_RUN",
+            },
         ]
         args = types.SimpleNamespace(
             skip_dvfs_apply=False,
@@ -442,13 +508,16 @@ class TestRunMainPreSubmitWait(unittest.TestCase):
 
         mock_controller.assert_called_once()
         self.assertEqual(mock_discover.call_count, 2)
-        self.assertEqual(controller_instance.apply_to_cores.call_count, 2)
-        first_call = controller_instance.apply_to_cores.call_args_list[0].kwargs
-        second_call = controller_instance.apply_to_cores.call_args_list[1].kwargs
-        self.assertEqual(first_call["node_name"], "ridlserver04")
-        self.assertEqual(second_call["node_name"], "ridlserver05")
-        self.assertEqual(first_call["frequency_mhz"], 2400.0)
-        self.assertTrue(first_call["dry_run"])
+        controller_instance.apply_plan_by_node.assert_called_once()
+        node_rules = controller_instance.apply_plan_by_node.call_args.kwargs["node_rules"]
+        self.assertEqual(
+            node_rules,
+            {
+                "ridlserver04": [{"core_numbers": [0, 1], "frequency_mhz": 2400.0}],
+                "ridlserver05": [{"core_numbers": [0, 1], "frequency_mhz": 2400.0}],
+            },
+        )
+        self.assertTrue(controller_instance.apply_plan_by_node.call_args.kwargs["dry_run"])
         mock_print_summary.assert_called_once()
 
     def test_apply_overload_end_reset_to_max_frequency_targets_all_mapped_nodes(self) -> None:
