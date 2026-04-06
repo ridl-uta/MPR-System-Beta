@@ -17,6 +17,8 @@ Options:
   --target-mhz 2200     Test frequency in MHz (default: 2200)
   --restore-mhz 2400    Restore frequency in MHz (default: 2400)
   --control-kind KIND   PERF_CTL or CORE_MAX (default: PERF_CTL)
+  --cpufreq-sync        Enable CPUFreq policy sync in test config
+  --no-cpufreq-sync     Disable CPUFreq policy sync in test config (default)
   --skip-install        Do not run dvfs/install_geopm_apply_systemd.sh
   --keep-temp           Keep temporary config files on local/remote target
   -h, --help            Show this help and exit
@@ -33,6 +35,9 @@ CORES="0 1"
 TARGET_MHZ="2200"
 RESTORE_MHZ="2400"
 CONTROL_KIND="PERF_CTL"
+CPUFREQ_SYNC=0
+CPUFREQ_GOVERNOR="userspace"
+CPUFREQ_MIN_KHZ="1000000"
 SKIP_INSTALL=0
 KEEP_TEMP=0
 
@@ -78,6 +83,14 @@ while (( $# > 0 )); do
       shift
       [[ $# -gt 0 ]] || { echo "[ERR] --control-kind requires a value" >&2; exit 1; }
       CONTROL_KIND="$1"
+      shift
+      ;;
+    --cpufreq-sync)
+      CPUFREQ_SYNC=1
+      shift
+      ;;
+    --no-cpufreq-sync)
+      CPUFREQ_SYNC=0
       shift
       ;;
     --skip-install)
@@ -184,6 +197,15 @@ make_conf() {
 ### RULE local-test
 FREQ_HZ=${freq_hz}
 CONTROL_KIND=${CONTROL_KIND}
+EOF
+  if (( CPUFREQ_SYNC == 1 )); then
+    cat >>"${out_path}" <<EOF
+CPUFREQ_SYNC=1
+CPUFREQ_GOVERNOR=${CPUFREQ_GOVERNOR}
+CPUFREQ_MIN_KHZ=${CPUFREQ_MIN_KHZ}
+EOF
+  fi
+  cat >>"${out_path}" <<EOF
 CORES="${CORES}"
 EOF
 }
@@ -201,6 +223,12 @@ print_readback() {
   for core in ${CORES}; do
     run_target_cmd "if [ -r /sys/devices/system/cpu/cpu${core}/cpufreq/scaling_max_freq ]; then printf 'cpu%s scaling_max_freq=%s kHz\\n' '${core}' \"\$(cat /sys/devices/system/cpu/cpu${core}/cpufreq/scaling_max_freq)\"; else printf 'cpu%s scaling_max_freq=<unavailable>\\n' '${core}'; fi"
   done
+}
+
+run_apply_path() {
+  local conf_path="$1"
+  local cmd="sudo -n /usr/local/sbin/geopm_apply.sh '${conf_path}' || /usr/local/sbin/geopm_apply.sh '${conf_path}'"
+  run_target_cmd "${cmd}"
 }
 
 if (( TARGET_IS_LOCAL == 0 )); then
@@ -239,6 +267,7 @@ fi
 
 echo "[INFO] verifying installed helper on ${TARGET_NODE}"
 run_target_cmd "grep -n 'total_failed > 0 || total_applied == 0' /usr/local/sbin/geopm_apply.sh"
+echo "[INFO] cpufreq_sync=${CPUFREQ_SYNC} cpufreq_governor=${CPUFREQ_GOVERNOR} cpufreq_min_khz=${CPUFREQ_MIN_KHZ}"
 
 TARGET_CONF_PATH="${LOCAL_TEST_CONF}"
 RESTORE_CONF_PATH="${LOCAL_RESTORE_CONF}"
@@ -249,7 +278,7 @@ fi
 
 echo "[INFO] applying test frequency ${TARGET_MHZ} MHz on ${TARGET_NODE} cores: ${CORES}"
 set +e
-run_target_cmd "sudo /usr/local/sbin/geopm_apply.sh '${TARGET_CONF_PATH}'"
+run_apply_path "${TARGET_CONF_PATH}"
 TEST_RC=$?
 set -e
 echo "[INFO] test apply exit code: ${TEST_RC}"
@@ -257,7 +286,7 @@ print_readback
 
 echo "[INFO] restoring ${RESTORE_MHZ} MHz on ${TARGET_NODE} cores: ${CORES}"
 set +e
-run_target_cmd "sudo /usr/local/sbin/geopm_apply.sh '${RESTORE_CONF_PATH}'"
+run_apply_path "${RESTORE_CONF_PATH}"
 RESTORE_RC=$?
 set -e
 echo "[INFO] restore exit code: ${RESTORE_RC}"
