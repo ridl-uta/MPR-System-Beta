@@ -417,6 +417,7 @@ apply_perf_ctl() {
 # Apply a single configuration file
 apply_one_conf() {
   local conf="$1"
+  local rc=0
   log "Applying config: $conf"
 
   # Support multi-rule blocks within a single file, delimited by lines starting
@@ -437,13 +438,16 @@ apply_one_conf() {
       for b in "${blocks[@]}"; do
         [[ -e "$b" ]] || continue
         log "Applying rule block: $(basename "$b") from $conf"
-        apply_block_from_file "$b" || true
+        if ! apply_block_from_file "$b"; then
+          rc=1
+        fi
       done
     else
       err "Found RULE markers but no blocks parsed in $conf"
+      rc=1
     fi
     rm -rf "$tmpdir"
-    return 0
+    return "$rc"
   fi
 
   # Single-block classic config
@@ -453,8 +457,13 @@ apply_one_conf() {
 total_applied=0
 total_failed=0
 for conf in "${CONFIGS[@]}"; do
-  apply_one_conf "$conf" || true
+  if ! apply_one_conf "$conf"; then
+    :
+  fi
 done
 
 log "Total Applied=${total_applied} Failed=${total_failed}"
+if (( total_failed > 0 || total_applied == 0 )); then
+  exit 2
+fi
 exit 0

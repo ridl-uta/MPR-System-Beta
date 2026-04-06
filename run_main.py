@@ -1395,6 +1395,34 @@ def print_dvfs_apply_summary(dvfs_df: pd.DataFrame) -> None:
         print("\nDVFS verification details (non-pass):")
         detail_cols = ["job", "node_name", "status", "verify_status", "verify_reason"]
         print(failure_rows[detail_cols].to_string(index=False))
+        failure_keys = set(zip(failure_rows["job"], failure_rows["node_name"]))
+        failure_detail = (
+            dvfs_df[
+                dvfs_df.apply(
+                    lambda row: (row["job"], row["node_name"]) in failure_keys,
+                    axis=1,
+                )
+            ][["job", "node_name", "run_target", "returncode", "command", "stdout", "stderr"]]
+            .drop_duplicates(subset=["job", "node_name"])
+            .reset_index(drop=True)
+        )
+        for _, row in failure_detail.iterrows():
+            print(
+                "\nDVFS failure payload:",
+                f"job={row['job']}",
+                f"node={row['node_name']}",
+                f"run_target={row['run_target']}",
+                f"returncode={row['returncode']}",
+            )
+            print(f"command: {row['command']}")
+            stdout_text = str(row["stdout"]).strip()
+            stderr_text = str(row["stderr"]).strip()
+            if stdout_text:
+                print("stdout:")
+                print(stdout_text)
+            if stderr_text:
+                print("stderr:")
+                print(stderr_text)
 
 
 def parse_sample_timestamp(ts_text: str) -> datetime:
