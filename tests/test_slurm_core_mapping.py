@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from dvfs.controller import DVFSController
 from dvfs.job_utilities import (
@@ -184,6 +185,64 @@ class TestDvfsVerification(unittest.TestCase):
         )
         self.assertEqual(fields["verify_status"], "FAIL")
         self.assertEqual(fields["verify_reason"], "target_ids_not_found_in_readback")
+
+    def test_batched_rules_use_single_host_conf_and_service_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controller = DVFSController(
+                conf_dir=tmpdir,
+                control_kind="PERF_CTL",
+                cpufreq_sync=True,
+                cpufreq_governor="userspace",
+                cpufreq_min_khz=1_000_000,
+            )
+            stale_dir = Path(tmpdir) / "ridlserver04.d"
+            stale_dir.mkdir(parents=True)
+            (stale_dir / "old.conf").write_text("stale\n", encoding="ascii")
+
+            with mock.patch.object(
+                controller,
+                "_run_apply_for_host",
+                return_value={
+                    "status": "APPLIED",
+                    "run_target": "service_script",
+                    "command": "dummy",
+                    "returncode": 0,
+                    "stdout": "\n".join(
+                        [
+                            "GEOPMREAD MSR::PERF_CTL:FREQ core 0 1.6e+09",
+                            "GEOPMREAD MSR::PERF_CTL:FREQ core 1 1.6e+09",
+                            "GEOPMREAD MSR::PERF_CTL:FREQ core 2 1.8e+09",
+                            "GEOPMREAD MSR::PERF_CTL:FREQ core 3 1.8e+09",
+                        ]
+                    ),
+                    "stderr": "",
+                },
+            ) as mock_run:
+                rows = controller.apply_rules_to_node(
+                    node_name="ridlserver04",
+                    rules=[
+                        {"core_numbers": [0, 1], "frequency_mhz": 1600.0},
+                        {"core_numbers": [2, 3], "frequency_mhz": 1800.0},
+                    ],
+                    dry_run=False,
+                )
+
+            conf_path = Path(tmpdir) / "ridlserver04.conf"
+            body = conf_path.read_text(encoding="ascii")
+            self.assertTrue(conf_path.exists())
+            self.assertFalse(stale_dir.exists())
+            self.assertIn("### RULE dvfs-controller-0000", body)
+            self.assertIn("### RULE dvfs-controller-0001", body)
+            self.assertIn("FREQ_HZ=1600000000", body)
+            self.assertIn("FREQ_HZ=1800000000", body)
+            self.assertEqual(body.count("CPUFREQ_SYNC=1"), 2)
+            self.assertIn('CORES="0 1"', body)
+            self.assertIn('CORES="2 3"', body)
+
+            mock_run.assert_called_once()
+            self.assertEqual(mock_run.call_args.kwargs["conf_path"], conf_path)
+            self.assertFalse(mock_run.call_args.kwargs.get("force_direct", False))
+            self.assertEqual({row["run_target"] for row in rows}, {"service_script"})
 
 
 if __name__ == "__main__":

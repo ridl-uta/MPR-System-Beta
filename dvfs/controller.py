@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import socket
 import shlex
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -148,15 +149,21 @@ class DVFSController:
     def _host_conf_path(self, node_name: str) -> Path:
         return self.conf_dir / f"{node_name}.conf"
 
-    def _write_rule_config(
+    def _host_conf_dir_path(self, node_name: str) -> Path:
+        return self.conf_dir / f"{node_name}.d"
+
+    def _remove_host_config_dir(self, node_name: str) -> None:
+        shutil.rmtree(self._host_conf_dir_path(node_name), ignore_errors=True)
+
+    def _build_rule_lines(
         self,
         *,
-        conf_path: Path,
+        rule_name: str,
         core_numbers: List[int],
         frequency_hz: int,
-    ) -> Path:
+    ) -> List[str]:
         lines = [
-            "### RULE dvfs-controller",
+            f"### RULE {rule_name}",
             f"FREQ_HZ={int(frequency_hz)}",
             f"CONTROL_KIND={self.control_kind}",
         ]
@@ -171,12 +178,28 @@ class DVFSController:
         if core_numbers:
             lines.append(f'CORES="{" ".join(str(c) for c in core_numbers)}"')
         lines.append("")
+        return lines
+
+    def _write_rule_config(
+        self,
+        *,
+        conf_path: Path,
+        core_numbers: List[int],
+        frequency_hz: int,
+        rule_name: str = "dvfs-controller",
+    ) -> Path:
+        lines = self._build_rule_lines(
+            rule_name=rule_name,
+            core_numbers=core_numbers,
+            frequency_hz=frequency_hz,
+        )
 
         conf_path.write_text("\n".join(lines), encoding="ascii")
         return conf_path
 
     def _write_host_config(self, *, node_name: str, core_numbers: List[int], frequency_hz: int) -> Path:
         self.conf_dir.mkdir(parents=True, exist_ok=True)
+        self._remove_host_config_dir(node_name)
         conf_path = self._host_conf_path(node_name)
         return self._write_rule_config(
             conf_path=conf_path,
@@ -184,26 +207,28 @@ class DVFSController:
             frequency_hz=frequency_hz,
         )
 
-    def _write_host_config_dir(
+    def _write_host_multi_rule_config(
         self,
         *,
         node_name: str,
         rules: List[Dict[str, Any]],
     ) -> Path:
         self.conf_dir.mkdir(parents=True, exist_ok=True)
-        conf_dir_path = self.conf_dir / f"{node_name}.d"
-        conf_dir_path.mkdir(parents=True, exist_ok=True)
-        for existing in conf_dir_path.glob("*.conf"):
-            existing.unlink(missing_ok=True)
+        self._remove_host_config_dir(node_name)
+        conf_path = self._host_conf_path(node_name)
+        all_lines: list[str] = []
 
         for idx, rule in enumerate(rules):
-            conf_path = conf_dir_path / f"{idx:04d}.conf"
-            self._write_rule_config(
-                conf_path=conf_path,
-                core_numbers=self._normalize_cores(rule["core_numbers"]),
-                frequency_hz=int(rule["frequency_hz"]),
+            all_lines.extend(
+                self._build_rule_lines(
+                    rule_name=f"dvfs-controller-{idx:04d}",
+                    core_numbers=self._normalize_cores(rule["core_numbers"]),
+                    frequency_hz=int(rule["frequency_hz"]),
+                )
             )
-        return conf_dir_path
+
+        conf_path.write_text("\n".join(all_lines), encoding="ascii")
+        return conf_path
 
     def _build_apply_command(
         self,
@@ -568,12 +593,11 @@ class DVFSController:
         if not normalized_rules:
             return []
 
-        conf_target = self._write_host_config_dir(node_name=node_name, rules=normalized_rules)
+        conf_target = self._write_host_multi_rule_config(node_name=node_name, rules=normalized_rules)
         apply_result = self._run_apply_for_host(
             node_name=node_name,
             conf_path=conf_target,
             dry_run=dry_run,
-            force_direct=True,
         )
 
         rows: list[dict[str, Any]] = []
