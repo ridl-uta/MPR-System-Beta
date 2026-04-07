@@ -58,6 +58,39 @@ class TestRunMainPreSubmitWait(unittest.TestCase):
             args = parse_args()
         self.assertEqual(args.pre_submit_wait_s, 15.0)
 
+    def test_parse_args_accepts_idle_sampling_with_monitor(self) -> None:
+        argv = [
+            "run_main.py",
+            "--rank",
+            "hpccg=2",
+            "--enable-power-monitor",
+            "--pdu-user",
+            "apc",
+            "--pdu-password",
+            "secret",
+            "--idle-sample-s",
+            "30",
+            "--idle-warmup-s",
+            "5",
+        ]
+        with mock.patch.object(sys, "argv", argv):
+            args = parse_args()
+        self.assertEqual(args.idle_sample_s, 30.0)
+        self.assertEqual(args.idle_warmup_s, 5.0)
+
+    def test_parse_args_rejects_idle_sampling_without_monitor(self) -> None:
+        argv = [
+            "run_main.py",
+            "--rank",
+            "hpccg=2",
+            "--idle-sample-s",
+            "30",
+        ]
+        with mock.patch.object(sys, "argv", argv):
+            with self.assertRaises(SystemExit) as ctx:
+                parse_args()
+        self.assertEqual(ctx.exception.code, 2)
+
     def test_parse_args_rejects_negative_pre_submit_wait(self) -> None:
         argv = [
             "run_main.py",

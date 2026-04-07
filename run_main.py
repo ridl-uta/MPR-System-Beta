@@ -38,6 +38,7 @@ ACTIVE_JOB_STATES = {
 }
 
 CONTROL_ELIGIBLE_JOB_STATES = ACTIVE_JOB_STATES - {"PENDING", "REQUEUED"}
+REAPPLY_TRIGGER_EVENT_NAMES = {"SPIKE_WARNING", "RAMP_WARNING", "RAMP_PREDICTED"}
 
 
 def parse_lscpu_core_ids(topology_text: str) -> list[int]:
@@ -438,6 +439,22 @@ def parse_args() -> argparse.Namespace:
         default=5.0,
         help="Seconds to wait for first power sample when --current-power-w is not provided.",
     )
+    parser.add_argument(
+        "--idle-sample-s",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional pre-submit idle-baseline sampling window in seconds. "
+            "When > 0, the first market target is computed from idle power plus "
+            "the active jobs' modeled full-power baseline."
+        ),
+    )
+    parser.add_argument(
+        "--idle-warmup-s",
+        type=float,
+        default=5.0,
+        help="Warmup time before collecting idle-baseline power samples.",
+    )
     parser.add_argument("--max-freq-mhz", type=float, default=2400.0)
     parser.add_argument(
         "--enable-power-monitor",
@@ -557,6 +574,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--dvfs-step-mhz must be > 0.")
     if args.dvfs_verify_tol_mhz < 0:
         parser.error("--dvfs-verify-tol-mhz must be >= 0.")
+    if args.idle_sample_s < 0:
+        parser.error("--idle-sample-s must be >= 0.")
+    if args.idle_warmup_s < 0:
+        parser.error("--idle-warmup-s must be >= 0.")
     if args.post_jobs_monitor_s < 0:
         parser.error("--post-jobs-monitor-s must be >= 0.")
     if args.pre_submit_wait_s < 0:
@@ -580,6 +601,8 @@ def parse_args() -> argparse.Namespace:
         and args.overload_handled_low_margin_w < 0
     ):
         parser.error("--overload-handled-low-margin-w must be >= 0.")
+    if args.idle_sample_s > 0.0 and not args.enable_power_monitor:
+        parser.error("--idle-sample-s requires --enable-power-monitor.")
     try:
         args.job_ranks, args.job_base_names, args.job_display_names = parse_job_specs(args.rank)
         if args.post_overload_end_rank:
@@ -962,6 +985,105 @@ def compute_mpr_target_reduction_w(
     if base <= 0.0:
         return 0.0
     return max(0.0, base + float(target_offset_w))
+
+
+def compute_baseline_power_max(job_perf_data: dict[str, pd.DataFrame]) -> float:
+    models = normalize_job_perf_data(job_perf_data)
+    return float(sum(float(model.power_max) for model in models))
+
+
+def estimate_fixed_overhead_w(
+    *,
+    current_power_w: float,
+    active_jobs_power_max_w: float,
+    current_saved_power_w: float,
+) -> float:
+    estimated_cluster_baseline_w = max(0.0, float(current_power_w)) + max(0.0, float(current_saved_power_w))
+    return max(0.0, estimated_cluster_baseline_w - max(0.0, float(active_jobs_power_max_w)))
+
+
+def resolve_reapply_fixed_overhead_w(
+    *,
+    idle_power_w: float | None,
+    current_power_w: float,
+    active_jobs_power_max_w: float,
+    current_saved_power_w: float,
+) -> tuple[float, str]:
+    if idle_power_w is not None:
+        return max(0.0, float(idle_power_w)), "idle_baseline"
+    return (
+        estimate_fixed_overhead_w(
+            current_power_w=current_power_w,
+            active_jobs_power_max_w=active_jobs_power_max_w,
+            current_saved_power_w=current_saved_power_w,
+        ),
+        "dynamic_estimate",
+    )
+
+
+def compute_reapply_target_reduction_w_from_baseline(
+    *,
+    active_jobs_power_max_w: float,
+    fixed_overhead_w: float,
+    target_capacity_w: float,
+    target_offset_w: float,
+) -> float:
+    cluster_baseline_w = max(0.0, float(active_jobs_power_max_w)) + max(0.0, float(fixed_overhead_w))
+    base_reduction_w = max(0.0, cluster_baseline_w - float(target_capacity_w))
+    return compute_mpr_target_reduction_w(base_reduction_w, float(target_offset_w))
+
+
+def measure_idle_power_baseline(
+    *,
+    monitor: PowerMonitor,
+    sample_window_s: float,
+    warmup_s: float,
+    poll_interval_s: float,
+    startup_wait_s: float,
+) -> float:
+    window_s = max(0.0, float(sample_window_s))
+    if window_s <= 0.0:
+        raise ValueError("sample_window_s must be > 0")
+
+    _ = wait_for_initial_power_sample(monitor, startup_wait_s)
+
+    warmup = max(0.0, float(warmup_s))
+    if warmup > 0.0:
+        print("[Control] Idle baseline warmup:", f"warmup_s={warmup:.3f}")
+        time.sleep(warmup)
+
+    deadline = time.monotonic() + window_s
+    seen_timestamps: set[str] = set()
+    watts: list[float] = []
+
+    while True:
+        sample = monitor.get_last_sample()
+        if sample is not None:
+            ts = str(sample.get("timestamp", ""))
+            if ts and ts not in seen_timestamps:
+                seen_timestamps.add(ts)
+                watts.append(float(sample.get("total_watts", 0.0)))
+
+        remaining_s = deadline - time.monotonic()
+        if remaining_s <= 0.0:
+            break
+        time.sleep(min(max(0.05, float(poll_interval_s)), remaining_s))
+
+    if not watts:
+        raise RuntimeError(
+            "Idle baseline sampling collected no power samples. "
+            "Increase --idle-sample-s or --power-startup-wait-s."
+        )
+
+    avg_idle_power_w = float(sum(watts) / len(watts))
+    print(
+        "[Control] Idle power baseline:",
+        f"samples={len(watts)}",
+        f"avg_idle_power_w={avg_idle_power_w:.3f}",
+        f"min_idle_power_w={min(watts):.3f}",
+        f"max_idle_power_w={max(watts):.3f}",
+    )
+    return avg_idle_power_w
 
 
 def wait_for_initial_power_sample(
@@ -1594,10 +1716,11 @@ def apply_overload_reduction(
     current_power_w: float,
     base_required_reduction_w: float | None,
     allocations_cache: dict[str, dict[str, Any]],
-) -> tuple[bool, dict[str, dict[str, Any]]]:
+    target_reduction_w_override: float | None = None,
+) -> tuple[bool, dict[str, dict[str, Any]], float, dict[str, float]]:
     if not job_perf_data:
         print("\n[Control] No running jobs with live allocations are eligible for MPR. Skipping.")
-        return False, allocations_cache
+        return False, allocations_cache, 0.0, {}
 
     overload_w = max(0.0, float(current_power_w) - float(args.target_capacity_w))
     base_reduction_w = (
@@ -1605,22 +1728,31 @@ def apply_overload_reduction(
         if base_required_reduction_w is None
         else max(0.0, float(base_required_reduction_w))
     )
-    target_reduction_w = compute_mpr_target_reduction_w(
-        base_reduction_w,
-        float(args.target_offset_w),
-    )
+    if target_reduction_w_override is None:
+        target_reduction_w = compute_mpr_target_reduction_w(
+            base_reduction_w,
+            float(args.target_offset_w),
+        )
+        target_offset_w = float(args.target_offset_w)
+    else:
+        target_reduction_w = max(0.0, float(target_reduction_w_override))
+        target_offset_w = math.nan
     print(
         "\nCapacity check:",
         f"current_power_w={current_power_w:.3f}",
         f"target_capacity_w={args.target_capacity_w:.3f}",
         f"overload_w={overload_w:.3f}",
         f"required_reduction_w={base_reduction_w:.3f}",
-        f"target_offset_w={float(args.target_offset_w):.3f}",
+        (
+            f"target_offset_w={target_offset_w:.3f}"
+            if math.isfinite(target_offset_w)
+            else "target_offset_w=OVERRIDE"
+        ),
         f"mpr_target_reduction_w={target_reduction_w:.3f}",
     )
-    if base_reduction_w <= 0.0:
+    if target_reduction_w <= 0.0:
         print("No overload detected (current power is within target capacity).")
-        return False, allocations_cache
+        return False, allocations_cache, 0.0, {}
 
     market_result = run_market(args, job_perf_data, target_reduction_w)
     if bool(market_result.get("market_failed")):
@@ -1628,8 +1760,8 @@ def apply_overload_reduction(
             "[Control] Market failed: negative residual indicates target reduction "
             "was not met. Skipping DVFS reduction apply."
         )
-        return False, allocations_cache
-    _, job_freq_mhz = compute_frequency_targets(
+        return False, allocations_cache, 0.0, {}
+    freq_df, job_freq_mhz = compute_frequency_targets(
         market_result,
         job_perf_data,
         max_freq_mhz=args.max_freq_mhz,
@@ -1641,7 +1773,15 @@ def apply_overload_reduction(
         allocations_hint=allocations_cache,
     )
     allocations_cache.update(used)
-    return True, allocations_cache
+    saved_power_by_job = {
+        str(row["job"]): float(row["power_saved_w"])
+        for _, row in freq_df.iterrows()
+        if pd.notna(row.get("job")) and pd.notna(row.get("power_saved_w"))
+    }
+    applied_reduction_w = float(sum(saved_power_by_job.values()))
+    if applied_reduction_w <= 0.0:
+        applied_reduction_w = float(market_result.get("final_reduction_w", target_reduction_w))
+    return True, allocations_cache, applied_reduction_w, saved_power_by_job
 
 
 def run_event_driven_control_loop(
@@ -1649,6 +1789,7 @@ def run_event_driven_control_loop(
     scheduler: JobScheduler,
     args: argparse.Namespace,
     monitor: PowerMonitor,
+    idle_power_w: float | None,
     overload_event_queue: queue.Queue[dict[str, Any]],
     submit_df: pd.DataFrame,
     job_ranks: dict[str, int],
@@ -1687,6 +1828,9 @@ def run_event_driven_control_loop(
     tracked_job_ranks = dict(job_ranks)
     post_overload_end_submit_at: float | None = None
     post_overload_end_submitted = False
+    current_job_power_saved_w_by_job: dict[str, float] = {}
+    last_reduction_apply_at: float | None = None
+    reapply_min_interval_s = max(5.0, float(args.power_interval_s) * 3.0)
 
     if not control_actions_enabled:
         print(
@@ -1752,17 +1896,118 @@ def run_event_driven_control_loop(
                         )
                     if terminal_event_name is not None:
                         continue
-                    reduction_applied, market_allocations_cache = apply_overload_reduction(
+                    target_reduction_override: float | None = None
+                    if idle_power_w is not None and active_job_perf_data:
+                        active_jobs_power_max_w = compute_baseline_power_max(active_job_perf_data)
+                        target_reduction_override = compute_reapply_target_reduction_w_from_baseline(
+                            active_jobs_power_max_w=active_jobs_power_max_w,
+                            fixed_overhead_w=float(idle_power_w),
+                            target_capacity_w=float(args.target_capacity_w),
+                            target_offset_w=float(args.target_offset_w),
+                        )
+                        print(
+                            "[Control] First-market idle baseline target:",
+                            f"idle_power_w={float(idle_power_w):.3f}",
+                            f"active_jobs_power_max_w={active_jobs_power_max_w:.3f}",
+                            f"target_reduction_w={target_reduction_override:.3f}",
+                        )
+                    reduction_applied, market_allocations_cache, _applied_reduction_w, saved_power_by_job = apply_overload_reduction(
                         args=args,
                         scheduler=scheduler,
                         job_perf_data=active_job_perf_data,
                         current_power_w=selected_total_watts,
                         base_required_reduction_w=selected_required_w,
                         allocations_cache=market_allocations_cache,
+                        target_reduction_w_override=target_reduction_override,
                     )
                     if reduction_applied:
                         reduction_active = True
                         reset_applied = False
+                        current_job_power_saved_w_by_job = dict(saved_power_by_job)
+                        last_reduction_apply_at = time.monotonic()
+            elif (
+                control_actions_enabled
+                and reduction_active
+                and event_name in REAPPLY_TRIGGER_EVENT_NAMES
+            ):
+                if required_w <= 0.0:
+                    continue
+                now_reapply = time.monotonic()
+                if (
+                    last_reduction_apply_at is not None
+                    and (now_reapply - last_reduction_apply_at) < reapply_min_interval_s
+                ):
+                    continue
+                active_job_perf_data, active_allocations = resolve_active_control_context(
+                    scheduler=scheduler,
+                    tracked_job_keys=list(tracked_job_ranks.keys()),
+                    job_perf_data=job_perf_data,
+                    job_states=job_states,
+                )
+                market_allocations_cache = active_allocations
+                selected_total_watts = total_watts
+                selected_required_w = required_w
+                terminal_event_name: str | None = None
+                if float(args.wait_before_mpr_s) > 0.0:
+                    (
+                        selected_total_watts,
+                        selected_required_w,
+                        _peak_source,
+                        terminal_event_name,
+                    ) = wait_before_market_start(
+                        monitor=monitor,
+                        overload_event_queue=overload_event_queue,
+                        target_capacity_w=float(args.target_capacity_w),
+                        initial_total_watts=total_watts,
+                        initial_required_reduction_w=required_w,
+                        initial_timestamp=ts,
+                        wait_before_mpr_s=float(args.wait_before_mpr_s),
+                        poll_interval_s=loop_interval_s,
+                    )
+                if terminal_event_name is not None:
+                    continue
+                active_jobs_power_max_w = compute_baseline_power_max(active_job_perf_data)
+                current_saved_power_w = sum(
+                    float(current_job_power_saved_w_by_job.get(job_name, 0.0))
+                    for job_name in active_job_perf_data.keys()
+                )
+                fixed_overhead_w, fixed_overhead_source = resolve_reapply_fixed_overhead_w(
+                    idle_power_w=idle_power_w,
+                    current_power_w=selected_total_watts,
+                    active_jobs_power_max_w=active_jobs_power_max_w,
+                    current_saved_power_w=current_saved_power_w,
+                )
+                target_reduction_w = compute_reapply_target_reduction_w_from_baseline(
+                    active_jobs_power_max_w=active_jobs_power_max_w,
+                    fixed_overhead_w=fixed_overhead_w,
+                    target_capacity_w=float(args.target_capacity_w),
+                    target_offset_w=float(args.target_offset_w),
+                )
+                if target_reduction_w <= current_saved_power_w + 1e-9:
+                    continue
+                print(
+                    "[Control] Reapplying MPR during active reduction:",
+                    f"trigger={event_name}",
+                    f"active_jobs_power_max_w={active_jobs_power_max_w:.3f}",
+                    f"current_saved_power_w={current_saved_power_w:.3f}",
+                    f"fixed_overhead_source={fixed_overhead_source}",
+                    f"fixed_overhead_w={fixed_overhead_w:.3f}",
+                    f"target_reduction_w={target_reduction_w:.3f}",
+                )
+                reduction_applied, market_allocations_cache, _applied_reduction_w, saved_power_by_job = apply_overload_reduction(
+                    args=args,
+                    scheduler=scheduler,
+                    job_perf_data=active_job_perf_data,
+                    current_power_w=selected_total_watts,
+                    base_required_reduction_w=selected_required_w,
+                    allocations_cache=market_allocations_cache,
+                    target_reduction_w_override=target_reduction_w,
+                )
+                if reduction_applied:
+                    reduction_active = True
+                    reset_applied = False
+                    current_job_power_saved_w_by_job = dict(saved_power_by_job)
+                    last_reduction_apply_at = time.monotonic()
             elif event_name == "OVERLOAD_END":
                 if not control_actions_enabled:
                     print("[Control] OVERLOAD_END observed (no DVFS reset in detect-overload-only mode).")
@@ -1771,6 +2016,8 @@ def run_event_driven_control_loop(
                     market_allocations_cache = {}
                     reduction_active = False
                     reset_applied = True
+                    current_job_power_saved_w_by_job = {}
+                    last_reduction_apply_at = None
                 if (
                     args.post_overload_end_job_ranks
                     and not post_overload_end_submitted
@@ -1878,6 +2125,8 @@ def run_event_driven_control_loop(
                         market_allocations_cache = {}
                         reduction_active = False
                         reset_applied = True
+                        current_job_power_saved_w_by_job = {}
+                        last_reduction_apply_at = None
                 print("Post-job monitoring window ended. Exiting event-driven control loop.")
                 break
 
@@ -1892,10 +2141,21 @@ def main() -> int:
     monitor_stop_event = None
     monitor_worker = None
     overload_event_queue = None
+    idle_power_w: float | None = None
 
     try:
         apply_startup_reset_to_max_frequency(args)
         monitor, monitor_stop_event, monitor_worker, overload_event_queue = start_power_monitor(args)
+        if monitor is not None and float(args.idle_sample_s) > 0.0:
+            idle_power_w = measure_idle_power_baseline(
+                monitor=monitor,
+                sample_window_s=float(args.idle_sample_s),
+                warmup_s=float(args.idle_warmup_s),
+                poll_interval_s=float(args.power_interval_s),
+                startup_wait_s=float(args.power_startup_wait_s),
+            )
+            if overload_event_queue is not None:
+                _ = drain_overload_events(overload_event_queue)
         print("Source Slurm scripts:", scheduler.source_scripts_dir)
         print("Available jobs:", scheduler.available_jobs())
         print("Performance workbook:", scheduler.perf_xlsx_path)
@@ -1939,6 +2199,7 @@ def main() -> int:
                 scheduler=scheduler,
                 args=args,
                 monitor=monitor,
+                idle_power_w=idle_power_w,
                 overload_event_queue=overload_event_queue,
                 submit_df=submit_df,
                 job_ranks=job_ranks,
