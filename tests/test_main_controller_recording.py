@@ -8,6 +8,8 @@ import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+import csv
+import tempfile
 from unittest import mock
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -80,7 +82,7 @@ class MainControllerRecordingTest(unittest.TestCase):
     def test_finalize_record_uses_applied_frequency_only(self) -> None:
         controller = MainController(record_interval_mhz=100)
         controller._get_job_nodes = lambda _job_id: None  # type: ignore[method-assign]
-        controller._compute_avg_power = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        controller._compute_power_stat = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
 
         entry = {
             "job_id": "123",
@@ -105,7 +107,7 @@ class MainControllerRecordingTest(unittest.TestCase):
     def test_finalize_record_keeps_failed_dvfs_frequency_blank(self) -> None:
         controller = MainController(record_interval_mhz=100)
         controller._get_job_nodes = lambda _job_id: None  # type: ignore[method-assign]
-        controller._compute_avg_power = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        controller._compute_power_stat = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
 
         entry = {
             "job_id": "123",
@@ -126,6 +128,110 @@ class MainControllerRecordingTest(unittest.TestCase):
         self.assertIsNone(record["applied_freq_mhz"])
         self.assertEqual(record["dvfs_apply_status"], "FAILED")
         self.assertEqual(record["dvfs_apply_error"], "mock apply failure")
+
+    def test_finalize_record_uses_trimmed_median_power_stat(self) -> None:
+        controller = MainController(
+            record_interval_mhz=100,
+            record_power_stat="median",
+            record_trim_start_seconds=25.0,
+            record_trim_end_seconds=10.0,
+        )
+        controller._get_job_nodes = lambda _job_id: ("ridlserver04", ["ridlserver04"], 2)  # type: ignore[method-assign]
+        controller.idle_power_baseline = {"ridlserver04": 83.0}
+
+        expected_start = datetime(2026, 4, 9, 6, 36, 51, tzinfo=timezone.utc)
+        expected_end = datetime(2026, 4, 9, 6, 38, 29, tzinfo=timezone.utc)
+
+        def fake_compute_power_stat(start, end, node_filter=None, **kwargs):
+            self.assertEqual(start, expected_start)
+            self.assertEqual(end, expected_end)
+            self.assertEqual(node_filter, ["ridlserver04"])
+            self.assertEqual(kwargs["stat"], "median")
+            self.assertEqual(kwargs["trim_start_seconds"], 25.0)
+            self.assertEqual(kwargs["trim_end_seconds"], 10.0)
+            return 227.0
+
+        controller._compute_power_stat = fake_compute_power_stat  # type: ignore[method-assign]
+
+        entry = {
+            "job_id": "4529",
+            "cmd": ["python3", "utilities/submit_benchmark.py", "--ntasks=2", "/shared/src/HPCCG"],
+            "freq_mhz": 2400.0,
+            "requested_freq_mhz": 2400.0,
+            "applied_freq_mhz": 2400.0,
+            "reduction": 0.0,
+            "submitted_at": expected_start,
+            "start_time": expected_start,
+            "dvfs_apply_status": "APPLIED",
+            "dvfs_apply_error": None,
+        }
+
+        with mock.patch("main_controller.datetime") as mock_datetime:
+            mock_datetime.now.return_value = expected_end
+            mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+            record = controller._finalize_record(entry)
+
+        self.assertEqual(record["avg_power_w"], 227.0)
+        self.assertEqual(record["net_avg_power_w"], 144.0)
+        self.assertEqual(record["power_stat"], "median")
+        self.assertEqual(record["power_trim_start_s"], 25.0)
+        self.assertEqual(record["power_trim_end_s"], 10.0)
+
+    def test_compute_power_stat_trimmed_median_matches_plateau(self) -> None:
+        start = datetime(2026, 4, 9, 6, 0, 0, tzinfo=timezone.utc)
+        with tempfile.NamedTemporaryFile("w", newline="", delete=False) as tmp:
+            writer = csv.writer(tmp)
+            writer.writerow(["timestamp", "ridlserver04", "total_watts"])
+            for second in range(40):
+                ts = start.replace(second=second)
+                if second < 10:
+                    power = 140.0
+                elif second < 35:
+                    power = 225.0
+                else:
+                    power = 100.0
+                writer.writerow([ts.isoformat(), power, power])
+            csv_path = Path(tmp.name)
+
+        try:
+            power_monitor = types.SimpleNamespace(csv_path=str(csv_path))
+            controller = MainController(power_monitor=power_monitor, record_interval_mhz=100)
+            end = start.replace(second=39)
+
+            full_avg = controller._compute_power_stat(start, end, ["ridlserver04"], stat="avg")
+            full_median = controller._compute_power_stat(start, end, ["ridlserver04"], stat="median")
+            trimmed_avg = controller._compute_power_stat(
+                start,
+                end,
+                ["ridlserver04"],
+                stat="avg",
+                trim_start_seconds=10.0,
+                trim_end_seconds=5.0,
+            )
+            trimmed_median = controller._compute_power_stat(
+                start,
+                end,
+                ["ridlserver04"],
+                stat="median",
+                trim_start_seconds=10.0,
+                trim_end_seconds=5.0,
+            )
+            fallback_median = controller._compute_power_stat(
+                start,
+                end,
+                ["ridlserver04"],
+                stat="median",
+                trim_start_seconds=30.0,
+                trim_end_seconds=20.0,
+            )
+
+            self.assertEqual(full_avg, 188.125)
+            self.assertEqual(full_median, 225.0)
+            self.assertEqual(trimmed_avg, 225.0)
+            self.assertEqual(trimmed_median, 225.0)
+            self.assertEqual(fallback_median, 225.0)
+        finally:
+            csv_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

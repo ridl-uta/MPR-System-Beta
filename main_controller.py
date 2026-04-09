@@ -22,6 +22,7 @@ import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from statistics import median
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from managers import DVFSManager, MPRMarketManager, PowerMonitor
@@ -52,6 +53,9 @@ class MainController:
         record_dry_run: bool = False,
         record_interval_mhz: int = 100,
         record_submit_env: Optional[List[str]] = None,
+        record_power_stat: str = "avg",
+        record_trim_start_seconds: float = 0.0,
+        record_trim_end_seconds: float = 0.0,
     ) -> None:
         self._stop = threading.Event()
         self.power_monitor = power_monitor or PowerMonitor()
@@ -68,8 +72,13 @@ class MainController:
         self.record_dry_run = record_dry_run
         self.record_interval_mhz = int(record_interval_mhz)
         self.record_submit_env = list(record_submit_env or [])
+        self.record_power_stat = str(record_power_stat).lower()
+        self.record_trim_start_seconds = max(0.0, float(record_trim_start_seconds))
+        self.record_trim_end_seconds = max(0.0, float(record_trim_end_seconds))
         if self.record_interval_mhz <= 0:
             raise ValueError("record_interval_mhz must be > 0")
+        if self.record_power_stat not in {"avg", "median"}:
+            raise ValueError("record_power_stat must be 'avg' or 'median'")
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -417,10 +426,13 @@ class MainController:
                 if rank_count is None and node_tasks is not None:
                     rank_count = node_tasks
 
-        avg_power = self._compute_avg_power(
+        avg_power = self._compute_power_stat(
             start_time,
             end_time,
             node_hosts if node_hosts else None,
+            stat=self.record_power_stat,
+            trim_start_seconds=self.record_trim_start_seconds,
+            trim_end_seconds=self.record_trim_end_seconds,
         )
         net_power: Optional[float] = None
         if (
@@ -444,6 +456,9 @@ class MainController:
             "duration_s": (end_time - start_time).total_seconds(),
             "avg_power_w": avg_power,
             "net_avg_power_w": net_power,
+            "power_stat": self.record_power_stat,
+            "power_trim_start_s": self.record_trim_start_seconds,
+            "power_trim_end_s": self.record_trim_end_seconds,
             "dvfs_apply_status": entry.get("dvfs_apply_status"),
             "dvfs_apply_error": entry.get("dvfs_apply_error"),
         }
@@ -614,18 +629,78 @@ class MainController:
         total_avg, _ = result
         return total_avg
 
+    def _compute_power_stat(
+        self,
+        start: datetime,
+        end: datetime,
+        node_filter: Optional[Iterable[str]] = None,
+        *,
+        stat: str = "avg",
+        trim_start_seconds: float = 0.0,
+        trim_end_seconds: float = 0.0,
+    ) -> Optional[float]:
+        samples = self._load_power_samples(
+            start,
+            end,
+            node_filter=node_filter,
+            trim_start_seconds=trim_start_seconds,
+            trim_end_seconds=trim_end_seconds,
+        )
+        if not samples:
+            return None
+        totals, _ = samples
+        if stat == "median":
+            return float(median(totals))
+        return sum(totals) / len(totals)
+
     def _compute_power_averages(
         self,
         start: datetime,
         end: datetime,
         node_filter: Optional[Iterable[str]] = None,
     ) -> Optional[Tuple[float, Dict[str, float]]]:
+        samples = self._load_power_samples(start, end, node_filter=node_filter)
+        if not samples:
+            return None
+
+        totals, node_samples = samples
+        node_avgs = {
+            name: sum(values) / len(values)
+            for name, values in node_samples.items()
+            if values
+        }
+        total_avg = sum(totals) / len(totals)
+        return total_avg, node_avgs
+
+    def _load_power_samples(
+        self,
+        start: datetime,
+        end: datetime,
+        node_filter: Optional[Iterable[str]] = None,
+        *,
+        trim_start_seconds: float = 0.0,
+        trim_end_seconds: float = 0.0,
+    ) -> Optional[Tuple[List[float], Dict[str, List[float]]]]:
         if not self.power_monitor or not getattr(self.power_monitor, "csv_path", None):
             return None
 
         csv_path = Path(self.power_monitor.csv_path)  # type: ignore[attr-defined]
         if not csv_path.exists():
             return None
+
+        trimmed_start = start + timedelta(seconds=max(0.0, trim_start_seconds))
+        trimmed_end = end - timedelta(seconds=max(0.0, trim_end_seconds))
+        if trimmed_end <= trimmed_start:
+            logging.warning(
+                "[Record] Invalid trimmed power window start=%s end=%s trim_start=%.3fs trim_end=%.3fs; "
+                "falling back to untrimmed interval",
+                start.isoformat(),
+                end.isoformat(),
+                trim_start_seconds,
+                trim_end_seconds,
+            )
+            trimmed_start = start
+            trimmed_end = end
 
         try:
             with csv_path.open() as f:
@@ -654,9 +729,8 @@ class MainController:
                         )
                         selected_nodes = node_names
 
-                sums = defaultdict(float)
-                totals = 0.0
-                count = 0
+                totals: List[float] = []
+                node_samples: Dict[str, List[float]] = defaultdict(list)
 
                 for row in reader:
                     if len(row) <= total_idx:
@@ -667,7 +741,7 @@ class MainController:
                     except ValueError:
                         continue
                     ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-                    if ts < start or ts > end:
+                    if ts < trimmed_start or ts > trimmed_end:
                         continue
 
                     valid = True
@@ -682,22 +756,19 @@ class MainController:
                         continue
                     if filter_active:
                         # Focus the total on the job's nodes instead of the rack-wide aggregate.
-                        totals += sum(node_values.get(name, 0.0) for name in selected_nodes)
+                        totals.append(sum(node_values.get(name, 0.0) for name in selected_nodes))
                     else:
                         try:
-                            totals += float(row[total_idx])
+                            totals.append(float(row[total_idx]))
                         except ValueError:
                             continue
                     for name, value in node_values.items():
-                        sums[name] += value
-                    count += 1
+                        node_samples[name].append(value)
 
-                if count == 0:
+                if not totals:
                     return None
 
-                node_avgs = {name: sums[name] / count for name in node_names}
-                total_avg = totals / count
-                return total_avg, node_avgs
+                return totals, node_samples
         except Exception as exc:
             logging.error("[Record] Failed to compute power averages: %s", exc)
             return None
@@ -924,6 +995,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Frequency step (MHz) for record_performance DVFS sweeps",
     )
     parser.add_argument(
+        "--record-power-stat",
+        choices=["avg", "median"],
+        default="avg",
+        help="Statistic to record over the trimmed job power window",
+    )
+    parser.add_argument(
+        "--record-trim-start-seconds",
+        type=float,
+        default=0.0,
+        help="Seconds to drop from the start of each job before computing recorded power",
+    )
+    parser.add_argument(
+        "--record-trim-end-seconds",
+        type=float,
+        default=0.0,
+        help="Seconds to drop from the end of each job before computing recorded power",
+    )
+    parser.add_argument(
         "--submit-env",
         action="append",
         default=[],
@@ -1067,6 +1156,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         record_dry_run=args.record_dry_run,
         record_interval_mhz=args.record_interval_mhz,
         record_submit_env=args.submit_env,
+        record_power_stat=args.record_power_stat,
+        record_trim_start_seconds=args.record_trim_start_seconds,
+        record_trim_end_seconds=args.record_trim_end_seconds,
     )
 
     _install_signal_handlers(controller)

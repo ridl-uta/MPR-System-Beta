@@ -58,6 +58,25 @@ nohup python3 -m main_controller \
 ```
 This collects a 45-second idle baseline, launches the sbatch variations listed in `data/slurm_scripts.txt`, applies GEOPM reductions as jobs start, and appends per-job metrics to `output/perf_results.csv`.
 
+To record a plateau-like power metric instead of the full-window average, use a trimmed median:
+```
+nohup python3 -m main_controller \
+    --mode record_performance \
+    --record-idle-baseline \
+    --idle-sample-seconds 45 \
+    --record-power-stat median \
+    --record-trim-start-seconds 25 \
+    --record-trim-end-seconds 10 \
+    --record-output-csv output/perf_results.csv \
+    --pdu-map data/mapping.json \
+    --pdu-user apc \
+    --pdu-password ridl123 \
+    --pdu-csv output/pdu_log.csv \
+    --events-csv output/overload_events.csv \
+    > main_controller.log 2>&1 &
+```
+This keeps the existing `avg_power_w` / `net_avg_power_w` CSV columns for compatibility, but the recorded value is computed as the median of the per-job power samples after trimming the first 25 seconds and last 10 seconds.
+
 ## Record Performance (Dry-Run Preview)
 Preview the generated Slurm submissions (including resolved nodes, ranks, size and lookups) without launching any jobs:
 ```
