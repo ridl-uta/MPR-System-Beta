@@ -10,7 +10,7 @@ from typing import Deque, Optional
 def make_simple_overload_ctx(
     sample_period_s: float,
     threshold_w: float,
-    hysteresis_w: float = 20.0,
+    hysteresis_w: float = 80.0,
     min_over_s: int = 10,
     cooldown_s: int = 30,
     spike_threshold_w: Optional[float] = None,

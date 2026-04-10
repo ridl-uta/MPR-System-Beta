@@ -381,7 +381,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--overload-hysteresis-w",
         type=float,
-        default=20.0,
+        default=80.0,
         help="Hysteresis width (watts) below target used by overload detector.",
     )
     parser.add_argument(

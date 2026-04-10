@@ -134,6 +134,31 @@ class TestOverloadDetectionHandledZone(unittest.TestCase):
         self.assertEqual(names.count("OVERLOAD_HANDLED"), 1)
         self.assertEqual(names.count("OVERLOAD_END"), 1)
 
+    def test_t_low_uses_min_of_dynamic_low_and_base_low(self) -> None:
+        ctx = make_simple_overload_ctx(
+            sample_period_s=1.0,
+            threshold_w=810.0,
+            hysteresis_w=80.0,
+            min_over_s=2,
+            cooldown_s=3,
+            handled_window_s=10,
+            handled_high_margin_w=25.0,
+        )
+        events = _run_series(
+            ctx,
+            [
+                850.0,
+                870.0,  # OVERLOAD_START, required_reduction_w becomes 60, dynamic_low=750
+                725.0,
+                724.0,
+                723.0,  # OVERLOAD_END should fire because T_low=min(750, 730)=730
+            ],
+        )
+
+        self.assertEqual(events[0][2], "OVERLOAD_START")
+        self.assertEqual(events[-1][2], "OVERLOAD_END")
+        self.assertAlmostEqual(float(ctx["T_low"]), 730.0, places=6)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
