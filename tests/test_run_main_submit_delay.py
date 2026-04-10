@@ -455,6 +455,97 @@ class TestRunMainPreSubmitWait(unittest.TestCase):
         self.assertEqual(active_perf_data, {})
         self.assertEqual(active_allocations, {})
 
+    def test_resolve_active_control_context_prefers_cached_allocations(self) -> None:
+        scheduler = mock.Mock()
+        scheduler.get_submission_history.return_value = pd.DataFrame(
+            [
+                {"job_key": "minimd", "job_id": "4425", "status": "SUBMITTED"},
+                {"job_key": "hpccg", "job_id": "4426", "status": "SUBMITTED"},
+            ]
+        )
+        scheduler.get_cached_submitted_job_allocations = mock.Mock(
+            return_value={
+                "minimd": {
+                    "cores_by_node": {"ridlserver05": [0, 1]},
+                    "nodes": ["ridlserver05"],
+                },
+                "hpccg": {
+                    "cores_by_node": {"ridlserver12": [0, 1]},
+                    "nodes": ["ridlserver12"],
+                },
+            }
+        )
+
+        perf_df = pd.DataFrame(
+            {
+                "Resource Reduction": [0.0, 0.1],
+                "Extra Execution": [0.0, 1.0],
+                "Power": [100.0, 90.0],
+            }
+        )
+        active_perf_data, active_allocations = resolve_active_control_context(
+            scheduler=scheduler,
+            tracked_job_keys=["minimd", "hpccg"],
+            job_perf_data={"minimd": perf_df, "hpccg": perf_df},
+            job_states={"4425": "RUNNING", "4426": "RUNNING"},
+        )
+
+        scheduler.get_cached_submitted_job_allocations.assert_called_once_with(
+            job_names=["minimd", "hpccg"],
+            latest_only=True,
+        )
+        scheduler.get_submitted_job_allocations.assert_not_called()
+        self.assertEqual(list(active_perf_data.keys()), ["minimd", "hpccg"])
+        self.assertEqual(list(active_allocations.keys()), ["minimd", "hpccg"])
+
+    def test_resolve_active_control_context_falls_back_on_cache_miss(self) -> None:
+        scheduler = mock.Mock()
+        scheduler.get_submission_history.return_value = pd.DataFrame(
+            [
+                {"job_key": "minimd", "job_id": "4425", "status": "SUBMITTED"},
+                {"job_key": "hpccg", "job_id": "4426", "status": "SUBMITTED"},
+            ]
+        )
+        scheduler.get_cached_submitted_job_allocations = mock.Mock(
+            return_value={
+                "minimd": {
+                    "cores_by_node": {"ridlserver05": [0, 1]},
+                    "nodes": ["ridlserver05"],
+                },
+            }
+        )
+        scheduler.get_submitted_job_allocations.return_value = {
+            "hpccg": {
+                "cores_by_node": {"ridlserver12": [0, 1]},
+                "nodes": ["ridlserver12"],
+            },
+        }
+
+        perf_df = pd.DataFrame(
+            {
+                "Resource Reduction": [0.0, 0.1],
+                "Extra Execution": [0.0, 1.0],
+                "Power": [100.0, 90.0],
+            }
+        )
+        active_perf_data, active_allocations = resolve_active_control_context(
+            scheduler=scheduler,
+            tracked_job_keys=["minimd", "hpccg"],
+            job_perf_data={"minimd": perf_df, "hpccg": perf_df},
+            job_states={"4425": "RUNNING", "4426": "RUNNING"},
+        )
+
+        scheduler.get_cached_submitted_job_allocations.assert_called_once_with(
+            job_names=["minimd", "hpccg"],
+            latest_only=True,
+        )
+        scheduler.get_submitted_job_allocations.assert_called_once_with(
+            job_names=["hpccg"],
+            latest_only=True,
+        )
+        self.assertEqual(list(active_perf_data.keys()), ["minimd", "hpccg"])
+        self.assertEqual(list(active_allocations.keys()), ["minimd", "hpccg"])
+
     def test_reset_targets_preserve_completed_jobs_from_prior_reduction(self) -> None:
         scheduler = mock.Mock()
         scheduler.get_submission_history.return_value = pd.DataFrame(

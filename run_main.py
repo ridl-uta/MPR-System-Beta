@@ -1215,10 +1215,39 @@ def resolve_active_control_context(
     if not candidate_job_names:
         return {}, {}
 
-    allocations = scheduler.get_submitted_job_allocations(
-        job_names=candidate_job_names,
-        latest_only=True,
-    )
+    cached_lookup = None
+    if hasattr(type(scheduler), "get_cached_submitted_job_allocations"):
+        cached_lookup = getattr(scheduler, "get_cached_submitted_job_allocations", None)
+    elif "get_cached_submitted_job_allocations" in getattr(scheduler, "__dict__", {}):
+        cached_lookup = getattr(scheduler, "get_cached_submitted_job_allocations", None)
+    if callable(cached_lookup):
+        allocations = cached_lookup(
+            job_names=candidate_job_names,
+            latest_only=True,
+        )
+        missing_job_names = [
+            job_name
+            for job_name in candidate_job_names
+            if job_name not in allocations
+            or not isinstance(allocations[job_name].get("cores_by_node", {}), dict)
+            or not allocations[job_name].get("cores_by_node")
+        ]
+        if missing_job_names:
+            print(
+                "[Control] Allocation cache miss for active jobs:",
+                missing_job_names,
+            )
+            fetched_allocations = scheduler.get_submitted_job_allocations(
+                job_names=missing_job_names,
+                latest_only=True,
+            )
+            allocations = dict(allocations)
+            allocations.update(fetched_allocations)
+    else:
+        allocations = scheduler.get_submitted_job_allocations(
+            job_names=candidate_job_names,
+            latest_only=True,
+        )
     active_allocations: dict[str, dict[str, Any]] = {}
     for job_name in candidate_job_names:
         allocation = allocations.get(job_name)

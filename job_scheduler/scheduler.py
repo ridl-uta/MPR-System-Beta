@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import shlex
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -61,6 +62,10 @@ class JobScheduler:
         self._job_rank_cache: Dict[str, int] = {}
         self._perf_audit_rows: List[Dict[str, Any]] = []
         self._submission_rows: List[Dict[str, Any]] = []
+        self._allocation_cache_by_job_key: Dict[str, Dict[str, Any]] = {}
+        self._allocation_cache_by_job_id: Dict[str, Dict[str, Any]] = {}
+        self._allocation_warm_threads: Dict[str, threading.Thread] = {}
+        self._allocation_cache_lock = threading.Lock()
 
         self.helper = helper_utility or SlurmHelperUtility()
         if not self.source_scripts_dir.exists():
@@ -95,6 +100,125 @@ class JobScheduler:
 
     def _record_submission_row(self, row: Dict[str, Any]) -> None:
         self._submission_rows.append(dict(row))
+
+    @staticmethod
+    def _clone_allocation(allocation: Dict[str, Any]) -> Dict[str, Any]:
+        cloned = dict(allocation)
+        nodes = allocation.get("nodes", [])
+        if isinstance(nodes, list):
+            cloned["nodes"] = list(nodes)
+        cores_by_node = allocation.get("cores_by_node", {})
+        if isinstance(cores_by_node, dict):
+            cloned["cores_by_node"] = {
+                str(node_name): [int(core) for core in cores]
+                for node_name, cores in cores_by_node.items()
+                if isinstance(cores, list)
+            }
+        return cloned
+
+    def _cache_job_allocation(
+        self,
+        *,
+        job_key: str,
+        job_id: str,
+        allocation: Dict[str, Any],
+    ) -> None:
+        cores_by_node = allocation.get("cores_by_node", {})
+        if not isinstance(cores_by_node, dict) or not cores_by_node:
+            return
+
+        cached = self._clone_allocation(allocation)
+        with self._allocation_cache_lock:
+            self._allocation_cache_by_job_key[str(job_key)] = cached
+            self._allocation_cache_by_job_id[str(job_id)] = cached
+
+    def _get_cached_job_allocation(
+        self,
+        *,
+        job_key: str,
+        job_id: str,
+    ) -> Dict[str, Any] | None:
+        with self._allocation_cache_lock:
+            cached = self._allocation_cache_by_job_id.get(str(job_id))
+            if cached is None:
+                cached = self._allocation_cache_by_job_key.get(str(job_key))
+        if cached is None:
+            return None
+        return self._clone_allocation(cached)
+
+    def _warm_job_allocation_until_ready(
+        self,
+        *,
+        job_key: str,
+        job_id: str,
+        max_wait_s: float = 60.0,
+        retry_delay_s: float = 2.0,
+    ) -> None:
+        deadline = time.monotonic() + max(0.0, float(max_wait_s))
+        try:
+            while time.monotonic() <= deadline:
+                allocation = self.helper.get_job_resource_allocation(str(job_id))
+                self._cache_job_allocation(
+                    job_key=str(job_key),
+                    job_id=str(job_id),
+                    allocation=allocation,
+                )
+                cached = self._get_cached_job_allocation(
+                    job_key=str(job_key),
+                    job_id=str(job_id),
+                )
+                if cached is not None:
+                    return
+
+                state = str(allocation.get("state", "")).upper()
+                if state and state not in {
+                    "PENDING",
+                    "CONFIGURING",
+                    "RUNNING",
+                    "COMPLETING",
+                    "STAGE_OUT",
+                    "SUSPENDED",
+                    "RESIZING",
+                    "SIGNALING",
+                    "REQUEUED",
+                }:
+                    return
+                time.sleep(max(0.1, float(retry_delay_s)))
+        finally:
+            with self._allocation_cache_lock:
+                self._allocation_warm_threads.pop(str(job_id), None)
+
+    def warm_job_allocation_async(
+        self,
+        *,
+        job_key: str,
+        job_id: str,
+        max_wait_s: float = 60.0,
+        retry_delay_s: float = 2.0,
+    ) -> None:
+        job_id_text = str(job_id).strip()
+        if not job_id_text or job_id_text.lower() in {"none", "nan"}:
+            return
+        if self._get_cached_job_allocation(job_key=str(job_key), job_id=job_id_text) is not None:
+            return
+
+        with self._allocation_cache_lock:
+            warm_thread = self._allocation_warm_threads.get(job_id_text)
+            if warm_thread is not None and warm_thread.is_alive():
+                return
+            warm_thread = threading.Thread(
+                target=self._warm_job_allocation_until_ready,
+                kwargs={
+                    "job_key": str(job_key),
+                    "job_id": job_id_text,
+                    "max_wait_s": float(max_wait_s),
+                    "retry_delay_s": float(retry_delay_s),
+                },
+                daemon=True,
+                name=f"alloc-warm-{job_id_text}",
+            )
+            self._allocation_warm_threads[job_id_text] = warm_thread
+        warm_thread.start()
 
     @staticmethod
     def _as_int_or_none(value: Any) -> int | None:
@@ -363,6 +487,8 @@ class JobScheduler:
             self.perf_sheet_map[key_name] = perf_name
             self._auto_load_perf_data_for_jobs([key_name])
         self._record_submission_row(row)
+        if status == "SUBMITTED":
+            self.warm_job_allocation_async(job_key=key_name, job_id=job_id)
         return row
 
     def submit_jobs(
@@ -510,6 +636,39 @@ class JobScheduler:
     def get_job_resource_allocation(self, job_id: str) -> Dict[str, Any]:
         return self.helper.get_job_resource_allocation(job_id)
 
+    def get_cached_submitted_job_allocations(
+        self,
+        *,
+        job_names: List[str] | None = None,
+        latest_only: bool = True,
+    ) -> Dict[str, Dict[str, Any]]:
+        history = self.get_submission_history(job_names=job_names)
+        if history.empty:
+            return {}
+
+        if "status" in history.columns:
+            history = history[history["status"].astype(str) == "SUBMITTED"]
+        if history.empty or "job_id" not in history.columns or "job" not in history.columns:
+            return {}
+
+        allocations: Dict[str, Dict[str, Any]] = {}
+        key_column = "job_key" if "job_key" in history.columns else "job"
+        selected_rows = (
+            history.groupby(key_column, as_index=False).tail(1)
+            if latest_only
+            else history
+        )
+        for _, row in selected_rows.iterrows():
+            job_name = str(row[key_column]).strip()
+            job_id = str(row["job_id"]).strip()
+            if not job_name or not job_id or job_id.lower() in {"none", "nan"}:
+                continue
+            cached = self._get_cached_job_allocation(job_key=job_name, job_id=job_id)
+            if cached is None:
+                continue
+            allocations[job_name] = cached
+        return allocations
+
     def get_submission_history(self, *, job_names: List[str] | None = None) -> pd.DataFrame:
         """Return previously attempted submissions from this scheduler instance."""
         history = pd.DataFrame(self._submission_rows)
@@ -570,7 +729,17 @@ class JobScheduler:
                 job_id = str(row["job_id"]).strip()
                 if not job_id or job_id.lower() in {"none", "nan"}:
                     continue
-                allocations[job_name] = self.get_job_resource_allocation(job_id)
+                cached = self._get_cached_job_allocation(job_key=job_name, job_id=job_id)
+                if cached is not None:
+                    allocations[job_name] = cached
+                    continue
+                allocation = self.get_job_resource_allocation(job_id)
+                self._cache_job_allocation(
+                    job_key=job_name,
+                    job_id=job_id,
+                    allocation=allocation,
+                )
+                allocations[job_name] = self._clone_allocation(allocation)
             return allocations
 
         for _, row in history.iterrows():
@@ -578,7 +747,17 @@ class JobScheduler:
             job_id = str(row["job_id"]).strip()
             if not job_id or job_id.lower() in {"none", "nan"}:
                 continue
-            allocations[f"{job_name}:{job_id}"] = self.get_job_resource_allocation(job_id)
+            cached = self._get_cached_job_allocation(job_key=job_name, job_id=job_id)
+            if cached is not None:
+                allocations[f"{job_name}:{job_id}"] = cached
+                continue
+            allocation = self.get_job_resource_allocation(job_id)
+            self._cache_job_allocation(
+                job_key=job_name,
+                job_id=job_id,
+                allocation=allocation,
+            )
+            allocations[f"{job_name}:{job_id}"] = self._clone_allocation(allocation)
         return allocations
 
     def load_perf_data_for_jobs(
