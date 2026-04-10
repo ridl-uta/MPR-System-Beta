@@ -101,11 +101,45 @@ map_cpu_to_core() {
   lscpu -p=CPU,CORE | awk -F, -v k="$cpu_id" '/^[^#]/ && $1==k {print $2; exit}'
 }
 
+load_all_target_cores() {
+  TARGET_CORES=()
+  local core
+  while IFS= read -r core; do
+    [[ -z "$core" ]] && continue
+    TARGET_CORES+=("$core")
+  done < <(lscpu -p=CORE | awk -F, '/^[^#]/{print $1}' | sort -n | uniq)
+}
+
+dedupe_target_cores() {
+  local deduped=()
+  local core
+  while IFS= read -r core; do
+    [[ -z "$core" ]] && continue
+    deduped+=("$core")
+  done < <(printf '%s\n' "${TARGET_CORES[@]}" | awk 'NF' | sort -n | uniq)
+  TARGET_CORES=("${deduped[@]}")
+}
+
 write_with_retry() {
   local cmd="$1"; shift
   local attempt=1
   while true; do
     if $cmd "$@"; then
+      return 0
+    fi
+    if (( attempt >= RETRIES )); then
+      return 1
+    fi
+    sleep "$RETRY_SLEEP"
+    attempt=$((attempt+1))
+  done
+}
+
+geopmwrite_config_with_retry() {
+  local config_path="$1"
+  local attempt=1
+  while true; do
+    if geopmwrite --config="$config_path"; then
       return 0
     fi
     if (( attempt >= RETRIES )); then
@@ -142,7 +176,7 @@ sync_cpufreq_policy() {
   local selected=0 rc=0
 
   if [[ ${#TARGET_CORES[@]} -eq 0 ]]; then
-    mapfile -t TARGET_CORES < <(lscpu -p=CORE | awk -F, '/^[^#]/{print $1}' | sort -n | uniq)
+    load_all_target_cores
   fi
 
   for core in "${TARGET_CORES[@]}"; do
@@ -324,7 +358,7 @@ apply_block_from_file() {
   fi
 
   if (( ${#TARGET_CORES[@]} > 0 )); then
-    mapfile -t TARGET_CORES < <(printf '%s\n' "${TARGET_CORES[@]}" | awk 'NF' | sort -n | uniq)
+    dedupe_target_cores
   fi
 
   if [[ "$CPUFREQ_SYNC" == "1" ]]; then
@@ -378,17 +412,17 @@ apply_block_from_file() {
   total_failed=$((total_failed + failed))
 }
 
-apply_core_max() {
+apply_geopm_per_core() {
+  local control_name="$1"
+  local log_name="$2"
   local rc=0
-  if [[ ${#TARGET_CORES[@]} -eq 0 ]]; then
-    mapfile -t TARGET_CORES < <(lscpu -p=CORE | awk -F, '/^[^#]/{print $1}' | sort -n | uniq)
-  fi
+  local core
   for core in "${TARGET_CORES[@]}"; do
-    if write_with_retry geopmwrite CPU_FREQUENCY_MAX_CONTROL core "$core" "$FREQ_HZ"; then
-      log "core ${core}: MAX_CONTROL=${FREQ_HZ}"
+    if write_with_retry geopmwrite "$control_name" core "$core" "$FREQ_HZ"; then
+      log "core ${core}: ${log_name}=${FREQ_HZ}"
       applied=$((applied+1))
     else
-      err "core ${core}: write MAX_CONTROL failed"
+      err "core ${core}: write ${log_name} failed"
       rc=1
       failed=$((failed+1))
     fi
@@ -396,22 +430,45 @@ apply_core_max() {
   return $rc
 }
 
-apply_perf_ctl() {
-  local rc=0
+apply_geopm_batch() {
+  local control_name="$1"
+  local log_name="$2"
   if [[ ${#TARGET_CORES[@]} -eq 0 ]]; then
-    mapfile -t TARGET_CORES < <(lscpu -p=CORE | awk -F, '/^[^#]/{print $1}' | sort -n | uniq)
+    load_all_target_cores
   fi
-  for core in "${TARGET_CORES[@]}"; do
-    if write_with_retry geopmwrite MSR::PERF_CTL:FREQ core "$core" "$FREQ_HZ"; then
-      log "core ${core}: PERF_CTL:FREQ=${FREQ_HZ}"
-      applied=$((applied+1))
-    else
-      err "core ${core}: write PERF_CTL:FREQ failed"
-      rc=1
-      failed=$((failed+1))
-    fi
-  done
-  return $rc
+  if [[ ${#TARGET_CORES[@]} -eq 0 ]]; then
+    err "No target cores found for ${log_name}"
+    return 1
+  fi
+
+  local batch_conf
+  batch_conf=$(mktemp)
+  {
+    local core
+    for core in "${TARGET_CORES[@]}"; do
+      printf '%s core %s %s\n' "$control_name" "$core" "$FREQ_HZ"
+    done
+  } > "$batch_conf"
+
+  if geopmwrite_config_with_retry "$batch_conf"; then
+    log "batch ${log_name}=${FREQ_HZ} cores=${TARGET_CORES[*]}"
+    applied=$((applied + ${#TARGET_CORES[@]}))
+  else
+    err "batch write ${log_name} failed for cores=${TARGET_CORES[*]}; falling back to per-core writes"
+    rm -f "$batch_conf"
+    apply_geopm_per_core "$control_name" "$log_name"
+    return $?
+  fi
+  rm -f "$batch_conf"
+  return 0
+}
+
+apply_core_max() {
+  apply_geopm_batch CPU_FREQUENCY_MAX_CONTROL MAX_CONTROL
+}
+
+apply_perf_ctl() {
+  apply_geopm_batch MSR::PERF_CTL:FREQ PERF_CTL:FREQ
 }
 
 # Apply a single configuration file
