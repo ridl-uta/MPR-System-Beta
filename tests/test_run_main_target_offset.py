@@ -187,7 +187,7 @@ class _SequenceMonitor:
 
 
 class TestWaitBeforeMarketStart(unittest.TestCase):
-    def test_uses_peak_spike_or_ramp_reduction_seen_during_wait(self) -> None:
+    def test_ignores_ramp_reduction_during_wait_and_uses_spike_peak(self) -> None:
         overload_event_queue: queue.Queue[dict[str, object]] = queue.Queue()
         overload_event_queue.put(
             {
@@ -201,8 +201,8 @@ class TestWaitBeforeMarketStart(unittest.TestCase):
             {
                 "event": "RAMP_PREDICTED",
                 "timestamp": "2026-03-13T09:10:55+00:00",
-                "total_watts": 908.0,
-                "required_reduction_w": 58.0,
+                "total_watts": 930.0,
+                "required_reduction_w": 80.0,
             }
         )
 
@@ -409,6 +409,104 @@ class TestEventLoopSimulation(unittest.TestCase):
             for call in mock_apply.call_args_list
         ]
         self.assertEqual(target_overrides, [30.0, 250.0, 330.0])
+        mock_reset.assert_called_once_with(args)
+
+    def test_ramp_events_do_not_reapply_market_during_active_reduction(self) -> None:
+        args = types.SimpleNamespace(
+            target_capacity_w=750.0,
+            target_offset_w=20.0,
+            power_startup_wait_s=0.0,
+            power_interval_s=1.0,
+            job_poll_interval_s=1.0,
+            job_status_print_interval_s=1.0,
+            detect_overload_only=False,
+            wait_before_mpr_s=0.0,
+            post_jobs_monitor_s=0.0,
+            post_overload_end_job_ranks={},
+            post_overload_end_wait_s=0.0,
+        )
+        scheduler = mock.Mock()
+        monitor = mock.Mock()
+        overload_event_queue: queue.Queue[dict[str, object]] = queue.Queue()
+        submit_df = pd.DataFrame([{"job_id": "5001", "status": "SUBMITTED"}])
+        tracked_job_ranks = {"job_a": 2, "job_b": 2}
+        initial_job_perf_data = {"job_a": self._job_df([400.0, 300.0])}
+
+        first_active = {
+            "job_a": self._job_df([400.0, 300.0]),
+            "job_b": self._job_df([200.0, 150.0]),
+        }
+
+        event_batches = [
+            [
+                {
+                    "event": "OVERLOAD_START",
+                    "timestamp": "2026-04-07T03:36:33+00:00",
+                    "total_watts": 760.0,
+                    "required_reduction_w": 10.0,
+                }
+            ],
+            [
+                {
+                    "event": "RAMP_PREDICTED",
+                    "timestamp": "2026-04-07T03:37:07+00:00",
+                    "total_watts": 807.0,
+                    "required_reduction_w": 57.0,
+                }
+            ],
+            [],
+        ]
+
+        with (
+            mock.patch(
+                "run_main.wait_for_initial_power_sample",
+                return_value={"timestamp": "2026-04-07T03:36:30+00:00", "total_watts": 700.0},
+            ),
+            mock.patch(
+                "run_main.query_submitted_job_states",
+                return_value={"5001": "RUNNING"},
+            ),
+            mock.patch(
+                "run_main.drain_overload_events",
+                side_effect=event_batches,
+            ),
+            mock.patch(
+                "run_main.resolve_active_control_context",
+                return_value=(first_active, {}),
+            ),
+            mock.patch(
+                "run_main.apply_overload_reduction",
+                return_value=(True, {}, 30.0, {"job_a": 20.0, "job_b": 10.0}),
+            ) as mock_apply,
+            mock.patch(
+                "run_main.has_active_jobs",
+                side_effect=[True, True, True, False, False],
+            ),
+            mock.patch(
+                "run_main.apply_overload_end_reset_to_max_frequency",
+            ) as mock_reset,
+            mock.patch(
+                "run_main.time.monotonic",
+                side_effect=[0.0, 0.1, 6.0, 6.1, 12.0, 12.1],
+            ),
+            mock.patch("run_main.time.sleep", return_value=None),
+        ):
+            run_event_driven_control_loop(
+                scheduler=scheduler,
+                args=args,
+                monitor=monitor,
+                idle_power_w=160.0,
+                overload_event_queue=overload_event_queue,
+                submit_df=submit_df,
+                job_ranks=tracked_job_ranks,
+                job_perf_data=initial_job_perf_data,
+            )
+
+        self.assertEqual(mock_apply.call_count, 1)
+        self.assertEqual(
+            mock_apply.call_args.kwargs["target_reduction_w_override"],
+            30.0,
+        )
         mock_reset.assert_called_once_with(args)
 
 

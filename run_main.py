@@ -38,7 +38,7 @@ ACTIVE_JOB_STATES = {
 }
 
 CONTROL_ELIGIBLE_JOB_STATES = ACTIVE_JOB_STATES - {"PENDING", "REQUEUED"}
-REAPPLY_TRIGGER_EVENT_NAMES = {"SPIKE_WARNING", "RAMP_WARNING", "RAMP_PREDICTED"}
+REAPPLY_TRIGGER_EVENT_NAMES = {"SPIKE_WARNING"}
 
 
 def parse_lscpu_core_ids(topology_text: str) -> list[int]:
@@ -396,7 +396,7 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help=(
             "Seconds to wait after OVERLOAD_START before running MPR. "
-            "During this window, spike/ramp events and power samples can raise "
+            "During this window, spike events and power samples can raise "
             "the reduction target to the highest observed value."
         ),
     )
@@ -1279,10 +1279,10 @@ def wait_before_market_start(
     print(
         "[Control] Waiting before MPR:",
         f"wait_before_mpr_s={wait_s:.3f}",
-        "tracking peak reduction from overload/spike/ramp events.",
+        "tracking peak reduction from overload/spike events.",
     )
     deadline = time.monotonic() + wait_s
-    peak_event_names = {"OVERLOAD_START", "SPIKE_WARNING", "RAMP_WARNING", "RAMP_PREDICTED"}
+    peak_event_names = {"OVERLOAD_START", "SPIKE_WARNING"}
     terminal_event_names = {"OVERLOAD_END", "OVERLOAD_HANDLED"}
 
     while True:
