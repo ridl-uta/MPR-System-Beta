@@ -18,6 +18,11 @@ export OMPI_MCA_btl=${OMPI_MCA_btl:-self,vader,tcp}
 export OMPI_MCA_btl_tcp_if_include=${OMPI_MCA_btl_tcp_if_include:-192.168.2.0/24}
 export OMPI_MCA_oob_tcp_if_include=${OMPI_MCA_oob_tcp_if_include:-192.168.2.0/24}
 
+# Deterministic OpenMP placement inside each Slurm rank allocation.
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-${SLURM_CPUS_PER_TASK:-1}}
+export OMP_PLACES=${OMP_PLACES:-cores}
+export OMP_PROC_BIND=${OMP_PROC_BIND:-close}
+
 # Per-rank problem dimensions; bump for longer runs.
 SIZE=${SIZE:-180}
 NX=${NX:-$SIZE}
@@ -25,7 +30,8 @@ NY=${NY:-$SIZE}
 NZ=${NZ:-$SIZE}
 
 # Optional repetition count for performance recording sweeps.
-JOB_REPEAT=${JOB_REPEAT:-1}
+# HPCCG_REPEAT is benchmark-specific; JOB_REPEAT is the generic fallback.
+JOB_REPEAT=${HPCCG_REPEAT:-${JOB_REPEAT:-1}}
 if ! [[ "$JOB_REPEAT" =~ ^[0-9]+$ ]] || [[ "$JOB_REPEAT" -lt 1 ]]; then
   echo "[ERROR] JOB_REPEAT must be a positive integer: $JOB_REPEAT" >&2
   exit 2
@@ -45,14 +51,16 @@ echo "OMPI_MCA_pml            = ${OMPI_MCA_pml}"
 echo "OMPI_MCA_btl            = ${OMPI_MCA_btl}"
 echo "OMPI_MCA_btl_tcp_if_include = ${OMPI_MCA_btl_tcp_if_include}"
 echo "OMPI_MCA_oob_tcp_if_include = ${OMPI_MCA_oob_tcp_if_include}"
+echo "OMP_NUM_THREADS         = ${OMP_NUM_THREADS}"
+echo "OMP_PLACES              = ${OMP_PLACES}"
+echo "OMP_PROC_BIND           = ${OMP_PROC_BIND}"
 echo "NX NY NZ                = ${NX} ${NY} ${NZ}"
 echo "JOB_REPEAT              = ${JOB_REPEAT}"
 echo "========================================"
 
-# Launch HPCCG with the configured grid dimensions using Slurm's pmi2 support.
 for ((job_repeat_iter=1; job_repeat_iter<=JOB_REPEAT; job_repeat_iter++)); do
   echo "[INFO] JOB_REPEAT iteration ${job_repeat_iter}/${JOB_REPEAT}"
-  srun --mpi=pmi2 --cpu-bind=cores ./test_HPCCG "$NX" "$NY" "$NZ"
+  srun --mpi=pmi2 --cpu-bind=cores --hint=nomultithread ./test_HPCCG "$NX" "$NY" "$NZ"
   status=$?
   if [[ "$status" -ne 0 ]]; then
     exit "$status"
