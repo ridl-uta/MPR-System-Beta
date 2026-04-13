@@ -37,6 +37,19 @@ if ! [[ "$JOB_REPEAT" =~ ^[0-9]+$ ]] || [[ "$JOB_REPEAT" -lt 1 ]]; then
   exit 2
 fi
 
+# Use contiguous rank masks for the 4-rank/2-node HPCCG recording layout.
+# This avoids Slurm's default even/odd interleaving across each 20-core node.
+if [[ -z "${HPCCG_CPU_BIND:-}" ]]; then
+  if [[ "${SLURM_NTASKS:-}" == "4" \
+      && "${SLURM_NTASKS_PER_NODE:-}" == "2" \
+      && "${SLURM_CPUS_PER_TASK:-}" == "10" ]]; then
+    HPCCG_CPU_BIND="mask_cpu:0x0003ff,0xffc00,0x0003ff,0xffc00"
+  else
+    HPCCG_CPU_BIND="cores"
+  fi
+fi
+HPCCG_CPU_DISTRIBUTION=${HPCCG_CPU_DISTRIBUTION:-block:block}
+
 cd "$WORKDIR"
 
 echo "========== HPCCG Slurm Launch =========="
@@ -54,13 +67,20 @@ echo "OMPI_MCA_oob_tcp_if_include = ${OMPI_MCA_oob_tcp_if_include}"
 echo "OMP_NUM_THREADS         = ${OMP_NUM_THREADS}"
 echo "OMP_PLACES              = ${OMP_PLACES}"
 echo "OMP_PROC_BIND           = ${OMP_PROC_BIND}"
+echo "HPCCG_CPU_BIND          = ${HPCCG_CPU_BIND}"
+echo "HPCCG_CPU_DISTRIBUTION  = ${HPCCG_CPU_DISTRIBUTION}"
 echo "NX NY NZ                = ${NX} ${NY} ${NZ}"
 echo "JOB_REPEAT              = ${JOB_REPEAT}"
 echo "========================================"
 
 for ((job_repeat_iter=1; job_repeat_iter<=JOB_REPEAT; job_repeat_iter++)); do
   echo "[INFO] JOB_REPEAT iteration ${job_repeat_iter}/${JOB_REPEAT}"
-  srun --mpi=pmi2 --cpu-bind=cores --hint=nomultithread ./test_HPCCG "$NX" "$NY" "$NZ"
+  srun \
+    --mpi=pmi2 \
+    --cpu-bind="${HPCCG_CPU_BIND}" \
+    --distribution="${HPCCG_CPU_DISTRIBUTION}" \
+    --hint=nomultithread \
+    ./test_HPCCG "$NX" "$NY" "$NZ"
   status=$?
   if [[ "$status" -ne 0 ]]; then
     exit "$status"
